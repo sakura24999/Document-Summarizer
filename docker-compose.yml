@@ -1,0 +1,120 @@
+
+
+services:
+  # Laravel Webアプリケーション
+  web:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    container_name: document-summarizer-web
+    restart: unless-stopped
+    volumes:
+      - ./:/var/www/html
+      - ./storage:/var/www/html/storage
+    environment:
+      - APP_ENV=local
+      - DB_HOST=db
+      - DB_DATABASE=summarizer
+      - DB_USERNAME=root
+      - DB_PASSWORD=secret
+      - REDIS_HOST=redis
+      - PYTHON_SERVICE_URL=http://python:8000
+    depends_on:
+      - db
+      - redis
+    networks:
+      - summarizer-network
+
+  # Webサーバー（Nginx）
+  nginx:
+    image: nginx:alpine
+    container_name: document-summarizer-nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./:/var/www/html
+      - ./docker/nginx/conf.d/:/etc/nginx/conf.d/
+    depends_on:
+      - web
+    networks:
+      - summarizer-network
+
+  # データベース（MySQL）
+  db:
+    image: mysql:8.0
+    container_name: document-summarizer-db
+    restart: unless-stopped
+    environment:
+      - MYSQL_DATABASE=summarizer
+      - MYSQL_ROOT_PASSWORD=secret
+      - MYSQL_CHARACTER_SET_SERVER=utf8mb4
+      - MYSQL_COLLATION_SERVER=utf8mb4_unicode_ci
+    volumes:
+      - dbdata:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    networks:
+      - summarizer-network
+
+  # キューサーバー（Redis）
+  redis:
+    image: redis:alpine
+    container_name: document-summarizer-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - summarizer-network
+
+  # Pythonマイクロサービス
+  python:
+    build:
+      context: ./python-service
+      dockerfile: Dockerfile
+    container_name: document-summarizer-python
+    restart: unless-stopped
+    volumes:
+      - ./python-service:/app
+      - ./storage/app/documents:/app/documents
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LARAVEL_API_URL=http://web/api
+      - API_TOKEN=${PYTHON_API_TOKEN}
+    ports:
+      - "8000:8000"
+    networks:
+      - summarizer-network
+
+  # キューワーカー
+  queue:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    container_name: document-summarizer-queue
+    restart: unless-stopped
+    command: php artisan queue:work
+    volumes:
+      - ./:/var/www/html
+    environment:
+      - APP_ENV=local
+      - DB_HOST=db
+      - DB_DATABASE=summarizer
+      - DB_USERNAME=root
+      - DB_PASSWORD=secret
+      - REDIS_HOST=redis
+      - PYTHON_SERVICE_URL=http://python:8000
+    depends_on:
+      - web
+      - db
+      - redis
+    networks:
+      - summarizer-network
+
+networks:
+  summarizer-network:
+    driver: bridge
+
+volumes:
+  dbdata:
+    driver: local
