@@ -81,6 +81,9 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - LARAVEL_API_URL=http://web/api
       - API_TOKEN=${PYTHON_API_TOKEN}
+      - CLAUDE_MODEL=claude-3-7-sonnet-20250219  # Claude APIで使用するモデル
+      - MAX_TOKENS=4000  # 応答の最大トークン数
+      - CHUNK_SIZE=20000  # 長文分割時のチャンクサイズ（文字数）
     ports:
       - "8000:8000"
     networks:

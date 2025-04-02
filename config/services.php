@@ -13,6 +13,12 @@ return [
     | a conventional file to locate the various service credentials.
     |
     */
+    'mailgun' => [
+        'domain' => env('MAILGUN_DOMAIN'),
+        'secret' => env('MAILGUN_SECRET'),
+        'endpoint' => env('MAILGUN_ENDPOINT', 'api.mailgun.net'),
+        'scheme' => 'https',
+    ],
 
     'postmark' => [
         'token' => env('POSTMARK_TOKEN'),
@@ -33,6 +39,19 @@ return [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
+    ],
+
+    // Python API サービスの設定
+    'python_api' => [
+        'url' => env('PYTHON_API_URL', 'http://python-service:8000'),
+        'token' => env('PYTHON_API_TOKEN', 'your-secret-token'),
+        'timeout' => env('PYTHON_API_TIMEOUT', 120),
+    ],
+
+    // Claude API設定（デバッグ用）
+    'claude' => [
+        'key' => env('ANTHROPIC_API_KEY'),
+        'model' => env('CLAUDE_MODEL', 'claude-3-7-sonnet-20250219'),
     ],
 
 ];

@@ -10,6 +10,21 @@ use Carbon\Carbon;
 
 class DashboardController extends Controller
 {
+
+    /**
+     * 文書タイプ別の統計を取得する
+     *
+     * @param bool $asArray 配列形式で返すかどうか
+     * @return mixed
+     */
+    private function getDocumentsByType($asArray = true)
+    {
+        $query = Document::select('document_type', DB::raw('count(*) as count'))
+            ->groupBy('document_type')
+            ->get();
+
+        return $asArray ? $query->pluck('count', 'document_type')->toArray() : $query;
+    }
     /**
      * ダッシュボード画面を表示する
      *
@@ -36,11 +51,7 @@ class DashboardController extends Controller
             ->get();
 
         // 文書タイプ別の統計
-        $documentsByType = Document::select('file_type', DB::raw('count(*) as count'))
-            ->groupBy('file_type')
-            ->get()
-            ->pluck('count', 'file_type')
-            ->toArray();
+        $documentsByType = $this->getDocumentsByType(true);
 
         // 月別のアップロード統計（過去6ヶ月）
         $monthlyStats = Document::select(
@@ -150,9 +161,7 @@ class DashboardController extends Controller
         $avgProcessingTime = DocumentSummary::avg('processing_time');
 
         // 文書タイプ別の統計
-        $documentsByType = Document::select('file_type', DB::raw('count(*) as count'))
-            ->groupBy('file_type')
-            ->get();
+        $documentsByType = $this->getDocumentsByType(false);
 
         // 月別統計（過去12ヶ月）
         $monthlyStats = Document::select(

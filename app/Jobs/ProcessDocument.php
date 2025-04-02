@@ -16,6 +16,19 @@ class ProcessDocument implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    /**
+     * 再試行回数
+     *
+     * @var int
+     */
+    public $tries = 3;
+
+    /**
+     * タイムアウト時間（秒）
+     *
+     * @var int
+     */
+    public $timeout = 300;
 
     /**
      * 処理する文書
@@ -60,15 +73,18 @@ class ProcessDocument implements ShouldQueue
             }
 
             // Python マイクロサービスに処理をリクエスト
-            $response = Http::post(config('services.python.url') . '/process', [
-                'document_id' => $this->document->id,
-                'file_path' => Storage::path($this->document->path),
-                'options' => array_merge([
-                    'detail_level' => $this->document->detail_level,
-                    'document_type' => $this->document->document_type,
-                    'extract_keywords' => $this->document->options['extract_keywords'] ?? true,
-                ], $this->options)
-            ]);
+            // 拡張して、タイムアウトと認証を追加
+            $response = Http::timeout($this->timeout)
+                ->withToken(config('services.python.token'))
+                ->post(config('services.python.url') . '/process', [
+                    'document_id' => $this->document->id,
+                    'file_path' => Storage::path($this->document->path),
+                    'options' => array_merge([
+                        'detail_level' => $this->document->detail_level,
+                        'document_type' => $this->document->document_type,
+                        'extract_keywords' => $this->document->options['extract_keywords'] ?? true,
+                    ], $this->options)
+                ]);
 
             if ($response->successful()) {
                 Log::info("文書処理リクエスト成功: ID {$this->document->id}");

@@ -126,4 +126,12 @@
 
 @section('scripts')
     <script src="{{ asset('js/summary.js') }}"></script>
+    @if ($document->status == 'processing')
+        <script>
+            // 5秒ごとにページをリロード（処理状態を更新するため）
+            setTimeout(function () {
+                location.reload();
+            }, 5000);
+        </script>
+    @endif
 @endsection

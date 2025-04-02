@@ -1,180 +1,245 @@
 import os
-import anthropic
-import time
+import json
 import logging
-from typing import Dict, Any, List, Optional
-from .prompt_templates import get_summary_prompt
+import anthropic
+from typing import Dict, List, Any, Optional, Tuple
 
+# プロンプトテンプレートをインポート
+from app.summarizers.prompt_templates import get_summary_prompt
+
+# ロギング設定
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ClaudeSummarizer:
-    """Claude APIを使用した文書要約クラス"""
+    """
+    Claude APIを使用して文書を要約するクラス
+    """
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key=None, model=None):
         """
         初期化
 
         Args:
-            api_key: Anthropic API Key
+            api_key: Anthropic API キー（Noneの場合は環境変数から取得）
+            model: 使用するモデル名（Noneの場合はデフォルト値を使用）
         """
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not self.api_key:
+            raise ValueError("Anthropic API キーが設定されていません")
+
+        self.model = model or os.environ.get("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
+        self.max_tokens = int(os.environ.get("MAX_TOKENS", "4000"))
+        self.chunk_size = int(os.environ.get("CHUNK_SIZE", "20000"))  # 文字数での最大チャンクサイズ
+
+        # Anthropicクライアントの初期化
         self.client = anthropic.Anthropic(api_key=self.api_key)
 
-    def summarize(
-        self,
-        text: str,
-        document_type: str = 'general',
-        detail_level: str = 'standard',
-        extract_keywords: bool = True
-    ) -> Dict[str, Any]:
+    def _split_text_into_chunks(self, text: str) -> List[str]:
         """
-        文書の要約を生成
+        テキストをチャンクに分割
 
         Args:
-            text: 要約対象のテキスト
-            document_type: 文書タイプ（legal, technical, medical, academic, business, generalなど）
-            detail_level: 要約の詳細度（brief, standard, detailed）
-            extract_keywords: 重要キーワードを抽出するかどうか
+            text: 分割するテキスト
+
+        Returns:
+            チャンクのリスト
+        """
+        # 段落分割
+        paragraphs = text.split('\n\n')
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for para in paragraphs:
+            # 段落の長さ（文字数）
+            para_length = len(para)
+
+            # 段落が単独でチャンクサイズを超える場合は、さらに分割
+            if para_length > self.chunk_size:
+                # すでに蓄積した段落があれば、チャンクとして追加
+                if current_chunk:
+                    chunks.append('\n\n'.join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+
+                # 長い段落をセンテンス単位で分割
+                sentences = para.replace('. ', '.\n').split('\n')
+                sub_chunk = []
+                sub_length = 0
+
+                for sentence in sentences:
+                    sentence_length = len(sentence)
+                    if sub_length + sentence_length > self.chunk_size:
+                        if sub_chunk:
+                            chunks.append(' '.join(sub_chunk))
+                        sub_chunk = [sentence]
+                        sub_length = sentence_length
+                    else:
+                        sub_chunk.append(sentence)
+                        sub_length += sentence_length
+
+                if sub_chunk:
+                    chunks.append(' '.join(sub_chunk))
+
+            # 通常の段落処理
+            elif current_length + para_length > self.chunk_size:
+                chunks.append('\n\n'.join(current_chunk))
+                current_chunk = [para]
+                current_length = para_length
+            else:
+                current_chunk.append(para)
+                current_length += para_length
+
+        # 残りの段落をチャンクとして追加
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+
+        logger.info(f"テキストを {len(chunks)} チャンクに分割しました")
+        return chunks
+
+    def _extract_json_from_response(self, response_text: str) -> Dict[str, Any]:
+        """
+        レスポンステキストからJSONデータを抽出
+
+        Args:
+            response_text: APIからのレスポンステキスト
+
+        Returns:
+            抽出されたJSONデータ（辞書）
+        """
+        try:
+            # JSONブロックを探す
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+
+            if json_start >= 0 and json_end > json_start:
+                json_str = response_text[json_start:json_end]
+                return json.loads(json_str)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"JSONの解析に失敗しました: {e}")
+
+        # JSON形式でなかった場合、キーワードをXMLタグから抽出
+        keywords = []
+        if '<keywords>' in response_text and '</keywords>' in response_text:
+            start_tag = response_text.find('<keywords>') + len('<keywords>')
+            end_tag = response_text.find('</keywords>')
+            if start_tag < end_tag:
+                keywords_str = response_text[start_tag:end_tag].strip()
+                keywords = [k.strip() for k in keywords_str.split(',')]
+
+        # 要約テキストとキーワードの辞書を返す
+        return {
+            "summary": response_text.replace('<keywords>', '').replace('</keywords>', ''),
+            "keywords": keywords
+        }
+
+    def _call_claude_api(self, text: str, prompt_dict: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Claude APIを呼び出す
+
+        Args:
+            text: 要約するテキスト
+            prompt_dict: プロンプト辞書（system, user）
+
+        Returns:
+            APIレスポンスから抽出した結果
+        """
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=prompt_dict["system"],
+                messages=[
+                    {"role": "user", "content": f"{prompt_dict['user']}\n\n{text}"}
+                ]
+            )
+
+            response_text = response.content[0].text
+            return self._extract_json_from_response(response_text)
+
+        except Exception as e:
+            logger.error(f"Claude API呼び出し中にエラーが発生しました: {e}")
+            raise
+
+    def summarize(self, text: str, document_type: str = 'general',
+                  detail_level: str = 'standard', extract_keywords: bool = True) -> Dict[str, Any]:
+        """
+        文書を要約する
+
+        Args:
+            text: 要約するテキスト
+            document_type: 文書タイプ
+            detail_level: 詳細レベル
+            extract_keywords: キーワードを抽出するかどうか
 
         Returns:
             要約結果の辞書
         """
-        start_time = time.time()
+        if not text or len(text.strip()) == 0:
+            raise ValueError("要約するテキストが空です")
 
-        # 文書が長すぎる場合は分割して処理
-        if len(text) > 100000:  # 約10万文字で分割
-            return self._summarize_long_document(
-                text, document_type, detail_level, extract_keywords
-            )
+        logger.info(f"文書要約開始: タイプ={document_type}, 詳細レベル={detail_level}")
 
-        # プロンプトの生成
-        prompt = get_summary_prompt(
-            document_type=document_type,
-            detail_level=detail_level,
-            extract_keywords=extract_keywords
-        )
-
-        try:
-            # Claude APIを呼び出し
-            logger.info(f"Calling Claude API for {document_type} document, detail level: {detail_level}")
-            response = self.client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=4000,
-                system=prompt["system"],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{prompt['user']}\n\n文書:\n{text[:100000]}"  # 10万文字まで
-                    }
-                ]
-            )
-
-            # XMLタグで構造化された応答を解析
-            summary, keywords = self._parse_response(response.content)
-
-            processing_time = time.time() - start_time
-
-            return {
-                "summary": summary,
-                "keywords": keywords,
-                "detail_level": detail_level,
-                "processing_info": {
-                    "processing_time_seconds": processing_time,
-                    "model": "claude-3-7-sonnet-20250219",
-                    "document_length": len(text)
-                }
-            }
-
-        except Exception as e:
-            logger.error(f"Error calling Claude API: {str(e)}")
-            raise
-
-    def _summarize_long_document(
-        self,
-        text: str,
-        document_type: str,
-        detail_level: str,
-        extract_keywords: bool
-    ) -> Dict[str, Any]:
-        """長い文書を分割して要約"""
-        # 文書を適切なチャンクに分割
-        chunks = self._split_text(text, chunk_size=80000)  # 約8万文字ずつ
-
-        # 各チャンクを個別に要約
-        chunk_summaries = []
-        all_keywords = []
-
-        for i, chunk in enumerate(chunks):
-            logger.info(f"Processing chunk {i+1}/{len(chunks)}")
-            chunk_result = self.summarize(
-                text=chunk,
+        # テキストの長さをチェックしてチャンク処理が必要か判断
+        if len(text) <= self.chunk_size:
+            # 短いテキストは直接処理
+            logger.info("短いテキスト: 直接処理")
+            prompt_dict = get_summary_prompt(
                 document_type=document_type,
                 detail_level=detail_level,
                 extract_keywords=extract_keywords
             )
-            chunk_summaries.append(chunk_result["summary"])
-            all_keywords.extend(chunk_result.get("keywords", []))
 
-        # 全ての要約をさらに要約
-        combined_summary = "\n\n".join(chunk_summaries)
-        final_result = self.summarize(
-            text=combined_summary,
-            document_type=document_type,
-            detail_level=detail_level,
-            extract_keywords=False  # 既にキーワードは抽出済み
-        )
+            result = self._call_claude_api(text, prompt_dict)
+            result["detail_level"] = detail_level
 
-        # キーワードを頻度でフィルタリング
-        unique_keywords = list(set(all_keywords))
+            return result
+        else:
+            # 長いテキストはチャンク処理
+            logger.info("長いテキスト: チャンク処理開始")
+            chunks = self._split_text_into_chunks(text)
+            chunk_results = []
 
-        return {
-            "summary": final_result["summary"],
-            "keywords": unique_keywords[:20],  # 上位20個
-            "detail_level": detail_level,
-            "processing_info": {
-                **final_result["processing_info"],
-                "chunks_processed": len(chunks)
+            # 各チャンクを順番に処理
+            for i, chunk in enumerate(chunks):
+                logger.info(f"チャンク {i+1}/{len(chunks)} 処理中...")
+
+                # チャンク用のプロンプトを取得
+                prompt_dict = get_summary_prompt(
+                    document_type=document_type,
+                    detail_level=detail_level,
+                    extract_keywords=False,  # 中間チャンクではキーワード抽出しない
+                    is_chunk=True,
+                    chunk_number=i+1,
+                    total_chunks=len(chunks)
+                )
+
+                # チャンクを処理
+                chunk_result = self._call_claude_api(chunk, prompt_dict)
+                chunk_results.append(chunk_result)
+
+            # 全チャンクの要約を結合
+            combined_summaries = "\n\n".join([r.get("summary", "") for r in chunk_results])
+
+            # 最終的な要約を生成
+            logger.info("全チャンクの統合要約を生成中...")
+            final_prompt = get_summary_prompt(
+                document_type=document_type,
+                detail_level=detail_level,
+                extract_keywords=extract_keywords,
+                is_final_summary=True
+            )
+
+            final_result = self._call_claude_api(combined_summaries, final_prompt)
+            final_result["detail_level"] = detail_level
+
+            # 処理情報を追加
+            final_result["processing_info"] = {
+                "chunks_count": len(chunks),
+                "total_length": len(text),
+                "chunked_processing": True
             }
-        }
 
-    def _split_text(self, text: str, chunk_size: int = 80000) -> List[str]:
-        """テキストを適切なチャンクに分割"""
-        if len(text) <= chunk_size:
-            return [text]
-
-        chunks = []
-        current_pos = 0
-
-        while current_pos < len(text):
-            # チャンクサイズに近い位置で句点を探す
-            end_pos = min(current_pos + chunk_size, len(text))
-
-            # 理想的には文の終わりで分割
-            if end_pos < len(text):
-                # 句点（。）で終わる位置を探す
-                last_period = text.rfind('。', current_pos, end_pos)
-                if last_period > current_pos + chunk_size // 2:  # 少なくとも半分以上進んでいる場合
-                    end_pos = last_period + 1
-
-            chunks.append(text[current_pos:end_pos])
-            current_pos = end_pos
-
-        return chunks
-
-    def _parse_response(self, response_text: str) -> tuple:
-        """Claude APIの応答を解析"""
-        summary = response_text
-        keywords = []
-
-        # キーワード抽出の例（実際の応答形式に合わせて調整が必要）
-        if '<keywords>' in response_text and '</keywords>' in response_text:
-            try:
-                keywords_text = response_text.split('<keywords>')[1].split('</keywords>')[0]
-                keywords = [k.strip() for k in keywords_text.split(',')]
-
-                # 要約部分を取得
-                summary = response_text.split('</keywords>')[1].strip()
-            except Exception as e:
-                logger.warning(f"Failed to parse keywords: {str(e)}")
-
-        return summary, keywords
+            logger.info("チャンク処理完了: 最終要約を生成しました")
+            return final_result

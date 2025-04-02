@@ -33,14 +33,38 @@ class FortifyServiceProvider extends ServiceProvider
         Fortify::updateUserPasswordsUsing(UpdateUserPassword::class);
         Fortify::resetUserPasswordsUsing(ResetUserPassword::class);
 
-        RateLimiter::for('login', function (Request $request) {
-            $throttleKey = Str::transliterate(Str::lower($request->input(Fortify::username())).'|'.$request->ip());
-
-            return Limit::perMinute(5)->by($throttleKey);
+        // ログインビュー
+        Fortify::loginView(function () {
+            return view('auth.login');
         });
 
-        RateLimiter::for('two-factor', function (Request $request) {
-            return Limit::perMinute(5)->by($request->session()->get('login.id'));
+        // 登録ビュー
+        Fortify::registerView(function () {
+            return view('auth.register');
+        });
+
+        // パスワードリセットビュー
+        Fortify::requestPasswordResetLinkView(function () {
+            return view('auth.forgot-password');
+        });
+
+        Fortify::resetPasswordView(function ($request) {
+            return view('auth.reset-password', ['request' => $request]);
+        });
+
+        // 確認ビュー
+        Fortify::verifyEmailView(function () {
+            return view('auth.verify-email');
+        });
+
+        // 2FAビュー
+        Fortify::twoFactorChallengeView(function () {
+            return view('auth.two-factor-challenge');
+        });
+
+        Fortify::confirmPasswordView(function () {
+            return view('auth.confirm-password');
         });
     }
 }
+

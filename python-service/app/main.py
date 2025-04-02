@@ -1,14 +1,30 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
-import requests
+from typing import Dict, List, Optional, Any, Union
 import os
+import uuid
 import logging
-from app.processors import get_processor_for_file
+from datetime import datetime
+
+# プロセッサーモジュール
+from app.processors.base import BaseDocumentProcessor
+from app.processors.pdf_processor import PDFProcessor
+from app.processors.docx_processor import DOCXProcessor
+from app.processors.text_processor import TEXTProcessor
+
+# 要約モジュール
 from app.summarizers.claude_summarizer import ClaudeSummarizer
 
-app = FastAPI(title="文書要約マイクロサービス")
+# ロギングの設定
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+)
+logger = logging.getLogger(__name__)
+
+# アプリケーションの初期化
+app = FastAPI(title="Document Summarizer API")
 
 # CORS設定
 app.add_middleware(
@@ -19,150 +35,150 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ロギング設定
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# 認証トークン
+API_TOKEN = os.getenv("API_TOKEN", "your-secret-token")
 
-# 環境変数からLaravel APIのURLとトークンを取得
-LARAVEL_API_URL = os.environ.get("LARAVEL_API_URL", "http://localhost:8000/api")
-API_TOKEN = os.environ.get("API_TOKEN", "")
+# タスク状態を保持する辞書
+tasks = {}
 
-# Anthropic API Keyの設定
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-
-# サマライザーの初期化
-summarizer = ClaudeSummarizer(api_key=ANTHROPIC_API_KEY)
-
+# リクエストモデル
 class DocumentRequest(BaseModel):
     document_id: int
     file_path: str
-    options: Optional[Dict[str, Any]] = {}
+    file_type: str
+    summary_type: str = "standard"  # 'brief', 'standard', 'detailed'
+    document_type: str = "general"  # 'legal', 'technical', 'medical', 'academic', 'business', 'general'
 
-@app.get("/health")
-async def health_check():
-    """ヘルスチェックエンドポイント"""
-    return {"status": "healthy"}
+# レスポンスモデル
+class TaskResponse(BaseModel):
+    task_id: str
+    status: str = "pending"
 
-@app.post("/process")
-async def process_document(request: DocumentRequest, background_tasks: BackgroundTasks):
-    """文書処理を非同期で開始"""
-    # バックグラウンドで処理を実行
-    background_tasks.add_task(process_document_task, request)
-    return {"status": "processing", "document_id": request.document_id}
+class SummaryResult(BaseModel):
+    summary: str
+    keywords: List[str]
+    metadata: Dict[str, Any]
 
-async def process_document_task(request: DocumentRequest):
-    """文書処理のメインタスク"""
-    document_id = request.document_id
-    file_path = request.file_path
-    options = request.options
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[SummaryResult] = None
+    error: Optional[str] = None
 
+# 認証依存関数
+async def verify_token(x_token: str = Header(...)):
+    if x_token != API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API token",
+        )
+    return x_token
+
+# プロセッサーのファクトリー関数
+def get_processor(file_type: str) -> BaseDocumentProcessor:
+    file_type = file_type.lower()
+    if file_type == 'pdf':
+        return PDFProcessor()
+    elif file_type in ['docx', 'doc']:
+        return DocxProcessor()
+    elif file_type in ['txt', 'text']:
+        return TextProcessor()
+    else:
+        raise ValueError(f"Unsupported file type: {file_type}")
+
+# バックグラウンドタスク
+async def process_document_task(task_id: str, request: DocumentRequest):
     try:
-        # ファイルタイプに基づいたプロセッサの取得
-        processor = get_processor_for_file(file_path)
-        if not processor:
-            raise ValueError(f"Unsupported file type: {file_path}")
+        tasks[task_id]["status"] = "processing"
 
-        # テキスト抽出
-        logger.info(f"Extracting text from {file_path}")
-        text, metadata = processor.extract_text(file_path)
+        # ファイルプロセッサーの取得
+        processor = get_processor(request.file_type)
 
-        # 文書タイプの自動判定（オプションで指定されていない場合）
-        document_type = options.get('document_type', 'auto')
-        if document_type == 'auto':
-            document_type = detect_document_type(text)
+        # ファイルパスの確認
+        file_path = request.file_path
+        if not os.path.exists(file_path):
+            # Laravelのストレージパスの場合は変換
+            storage_path = os.getenv("LARAVEL_STORAGE_PATH", "/var/www/html/storage/app")
+            file_path = os.path.join(storage_path, request.file_path)
 
-        # 要約の詳細レベル
-        detail_level = options.get('detail_level', 'standard')
+        # 文書の処理
+        extracted_text, metadata = processor.process(file_path)
 
-        # 要約生成
-        logger.info(f"Generating summary for document {document_id} with level {detail_level}")
-        summary_result = summarizer.summarize(
-            text=text,
-            document_type=document_type,
-            detail_level=detail_level,
-            extract_keywords=options.get('extract_keywords', True)
+        # 要約クラスの初期化
+        summarizer = ClaudeSummarizer()
+
+        # 要約と結果の取得
+        summary_text, keywords = summarizer.summarize(
+            text=extracted_text,
+            document_type=request.document_type,
+            summary_type=request.summary_type,
         )
 
-        # 結果をLaravelに送信
-        send_result_to_laravel(document_id, summary_result, metadata, document_type)
+        # タスク結果の更新
+        tasks[task_id].update({
+            "status": "completed",
+            "result": {
+                "summary": summary_text,
+                "keywords": keywords,
+                "metadata": metadata,
+            },
+            "completed_at": datetime.now().isoformat(),
+        })
+
+        logger.info(f"Document {request.document_id} processing completed: {task_id}")
 
     except Exception as e:
-        logger.error(f"Error processing document {document_id}: {str(e)}")
-        # エラー情報をLaravelに送信
-        send_error_to_laravel(document_id, str(e))
+        logger.error(f"Error processing document {request.document_id}: {str(e)}")
+        tasks[task_id].update({
+            "status": "failed",
+            "error": str(e),
+            "completed_at": datetime.now().isoformat(),
+        })
 
-def detect_document_type(text):
-    """文書タイプの自動判定"""
-    # 実際の実装では、テキスト分析によって文書タイプを判定
-    # 簡易的な実装例：
-    keywords = {
-        'legal': ['法律', '契約', '条項', '規約', '法令', '法的'],
-        'technical': ['技術', '仕様', 'システム', '実装', 'アーキテクチャ'],
-        'medical': ['医療', '診断', '治療', '患者', '病院', '臨床'],
-        'academic': ['研究', '論文', '調査', '分析', '理論', '実験'],
-        'business': ['ビジネス', '戦略', '市場', '売上', '利益', '顧客']
+# エンドポイント定義
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+@app.post("/api/process-document", response_model=TaskResponse, dependencies=[Depends(verify_token)])
+async def process_document(request: DocumentRequest, background_tasks: BackgroundTasks):
+    task_id = str(uuid.uuid4())
+
+    # タスク情報の初期化
+    tasks[task_id] = {
+        "document_id": request.document_id,
+        "status": "pending",
+        "created_at": datetime.now().isoformat(),
     }
 
-    counts = {doc_type: 0 for doc_type in keywords}
-    for doc_type, terms in keywords.items():
-        for term in terms:
-            counts[doc_type] += text.count(term)
+    # バックグラウンドタスクの追加
+    background_tasks.add_task(process_document_task, task_id, request)
 
-    # 最も一致数の多いタイプを返す
-    max_type = max(counts.items(), key=lambda x: x[1])
-    if max_type[1] > 0:
-        return max_type[0]
+    logger.info(f"Document {request.document_id} processing started: {task_id}")
 
-    # デフォルト値
-    return 'general'
+    return {"task_id": task_id, "status": "pending"}
 
-def send_result_to_laravel(document_id, summary_result, metadata, document_type):
-    """要約結果をLaravelに送信"""
-    url = f"{LARAVEL_API_URL}/documents/{document_id}/summary"
+@app.get("/api/task-status/{task_id}", response_model=TaskStatusResponse, dependencies=[Depends(verify_token)])
+async def get_task_status(task_id: str):
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
-    data = {
-        "status": "completed",
-        "summary": summary_result.get("summary", ""),
-        "keywords": summary_result.get("keywords", []),
-        "summaries": {
-            summary_result.get("detail_level", "standard"): summary_result.get("summary", "")
-        },
-        "metadata": {
-            **metadata,
-            "document_type": document_type,
-            "ai_processing_info": summary_result.get("processing_info", {})
-        }
+    task_info = tasks[task_id]
+
+    response = {
+        "task_id": task_id,
+        "status": task_info["status"],
     }
 
-    headers = {
-        "Authorization": f"Bearer {API_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    if "result" in task_info:
+        response["result"] = task_info["result"]
 
-    try:
-        response = requests.post(url, json=data, headers=headers)
-        response.raise_for_status()
-        logger.info(f"Successfully sent summary for document {document_id}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to send summary to Laravel: {str(e)}")
+    if "error" in task_info:
+        response["error"] = task_info["error"]
 
-def send_error_to_laravel(document_id, error_message):
-    """エラー情報をLaravelに送信"""
-    url = f"{LARAVEL_API_URL}/documents/{document_id}/summary"
+    return response
 
-    data = {
-        "status": "failed",
-        "error": error_message
-    }
-
-    headers = {
-        "Authorization": f"Bearer {API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        response = requests.post(url, json=data, headers=headers)
-        response.raise_for_status()
-        logger.info(f"Successfully sent error for document {document_id}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to send error to Laravel: {str(e)}")
+# メインエントリーポイント
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
