@@ -8,9 +8,14 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use App\Jobs\ProcessDocument;
 use App\Http\Requests\StoreDocumentRequest;
+use Illuminate\Support\Facades\Log;
 
 class DocumentController extends Controller
 {
+    public function __construct()
+    {
+
+    }
     /**
      * 文書一覧の表示
      */
@@ -21,6 +26,21 @@ class DocumentController extends Controller
             ->paginate(10);
 
         return view('documents.index', compact('documents'));
+    }
+
+    /**
+     * 新規文書アップロードフォームを表示
+     */
+    public function create()
+    {
+        return view('documents.create');
+    }
+
+    protected function authorize($ability, $arguments = [])
+    {
+        if (Auth::user()->cannot($ability, $arguments)) {
+            abort(403, 'Unauthorized action.');
+        }
     }
 
     /**
@@ -67,8 +87,9 @@ class DocumentController extends Controller
     /**
      * 文書の詳細と要約の表示
      */
-    public function show(Document $document)
+    public function show($id)
     {
+        $document = Document::findOrFail($id);
         // 権限チェック
         $this->authorize('view', $document);
 
@@ -129,4 +150,66 @@ class DocumentController extends Controller
             ->with('status', '文書を削除しました。');
     }
 
+    public function updateStatus(Request $request, Document $document)
+    {
+        $validated = $request->validate([
+            'status' => 'required|string|in:processing,completed,error',
+            'message' => 'nullable|string',
+            'summary' => 'nullable|string',
+            'keywords' => 'nullable|array'
+        ]);
+
+        $document->status = $validated['status'];
+
+        if (isset($validated['summary'])) {
+            $document->summary = $validated['summary'];
+        }
+
+        if (isset($validated['keywords'])) {
+            $document->keywords = $validated['keywords'];
+        }
+
+        // エラーメッセージがあればメタデータに保存
+        if (isset($validated['message'])) {
+            $metadata = json_decode($document->metadata ?? '{}', true) ?: [];
+            $metadata['error_message'] = $validated['message'];
+            $document->metadata = json_encode($metadata);
+        }
+
+        $document->save();
+
+        return response()->json(['success' => true]);
+    }
+
+    public function retryProcessing(Document $document)
+    {
+        try {
+            // ドキュメントのステータスをprocessingに戻す
+            $document->status = 'processing';
+            $document->save();
+
+            // ProcessDocumentジョブを再ディスパッチ
+            ProcessDocument::dispatch($document);
+
+            return response()->json(['status' => 'success']);
+        } catch (\Exception $e) {
+            Log::error('Retry processing failed: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    public function summarize(Document $document)
+    {
+        // 要約処理のロジックをここに実装
+        // 例えば：
+        try {
+            $document->status = 'processing';
+            $document->save();
+            ProcessDocument::dispatch($document);
+            return view('documents.summary', compact('document'));
+        } catch (\Exception $e) {
+            Log::error('Summary processing failed: ' . $e->getMessage());
+            return back()->with('error', 'ドキュメントの要約処理に失敗しました。');
+        }
+    }
 }

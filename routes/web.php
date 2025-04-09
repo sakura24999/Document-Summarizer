@@ -9,6 +9,11 @@ Route::middleware(['auth'])->group(function () {
     // ダッシュボード
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
+    // ユーザープロフィール
+    Route::get('/user/profile', function () {
+        return view('profile');
+    })->name('user.profile');
+
     // 文書管理
     Route::prefix('documents')->name('documents.')->group(function () {
         Route::get('/', [DocumentController::class, 'index'])->name('index');
@@ -19,7 +24,7 @@ Route::middleware(['auth'])->group(function () {
 
         // 文書要約関連
         Route::get('/{document}/summary', [DocumentController::class, 'showSummary'])->name('summary');
-        Route::post('/{document}/summarize', [DocumentController::class, 'summarize'])->name('summarize');
+        Route::match(['get', 'post'], '/{document}/summarize', [DocumentController::class, 'summarize'])->name('summarize');
     });
 });
 

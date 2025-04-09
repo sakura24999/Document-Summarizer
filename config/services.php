@@ -43,9 +43,9 @@ return [
 
     // Python API サービスの設定
     'python_api' => [
-        'url' => env('PYTHON_API_URL', 'http://python-service:8000'),
-        'token' => env('PYTHON_API_TOKEN', 'your-secret-token'),
-        'timeout' => env('PYTHON_API_TIMEOUT', 120),
+        'url' => env('PYTHON_API_URL', 'http://python:8000'),
+        'token' => env('PYTHON_API_TOKEN', 'doc_summarizer_secret_123'),
+        'timeout' => env('PYTHON_API_TIMEOUT', 300),
     ],
 
     // Claude API設定（デバッグ用）

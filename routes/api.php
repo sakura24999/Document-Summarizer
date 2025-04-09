@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\DocumentController;
 
 /*
 |--------------------------------------------------------------------------
@@ -18,3 +19,6 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
 
+Route::post('/documents/{document}/update-status', [DocumentController::class, 'updateStatus']);
+
+Route::post('/documents/{document}/retry', [DocumentController::class, 'retryProcessing']);

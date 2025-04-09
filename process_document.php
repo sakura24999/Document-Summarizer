@@ -75,8 +75,8 @@ class ProcessDocument implements ShouldQueue
             // Python マイクロサービスに処理をリクエスト
             // 拡張して、タイムアウトと認証を追加
             $response = Http::timeout($this->timeout)
-                ->withHeader('X-Token', config('services.python_api.token'))  // X-Tokenヘッダーを使用
-                ->post(config('services.python_api.url') . '/api/process-document', [  // 正しいエンドポイント
+                ->withHeader('X-Token', config('services.python.token'))  // X-Tokenヘッダーを使用
+                ->post(config('services.python.url') . '/api/process-document', [  // 正しいエンドポイント
                     'document_id' => $this->document->id,
                     'file_path' => $this->document->path,
                     'file_type' => pathinfo($this->document->path, PATHINFO_EXTENSION),

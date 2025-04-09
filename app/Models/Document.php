@@ -82,4 +82,43 @@ class Document extends Model
     {
         return $this->status === 'failed';
     }
+
+    /**
+     * 関連する要約を取得
+     */
+    public function summary()
+    {
+        return $this->hasOne(Summary::class);
+    }
+
+    /**
+     * ファイルタイプに基づいたアイコンのFontAwesomeクラスを取得
+     *
+     * @return string
+     */
+    public function getFileTypeIcon()
+    {
+        $extension = pathinfo($this->file_path, PATHINFO_EXTENSION);
+
+        return match (strtolower($extension)) {
+            'pdf' => 'fa-file-pdf',
+            'doc', 'docx' => 'fa-file-word',
+            'xls', 'xlsx' => 'fa-file-excel',
+            'ppt', 'pptx' => 'fa-file-powerpoint',
+            'txt' => 'fa-file-alt',
+            'zip', 'rar' => 'fa-file-archive',
+            'jpg', 'jpeg', 'png', 'gif' => 'fa-file-image',
+            default => 'fa-file',
+        };
+    }
+
+    /**
+     * このドキュメントに要約があるかどうかをチェック
+     *
+     * @return bool
+     */
+    public function hasSummary()
+    {
+        return $this->summary()->exists();
+    }
 }

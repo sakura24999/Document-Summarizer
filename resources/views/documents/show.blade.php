@@ -3,7 +3,7 @@
 @section('title', $document->filename)
 
 @section('styles')
-    <link href="{{ asset('css/summary.css') }}" rel="stylesheet">
+    @vite('resources/css/css/app.scss')
 @endsection
 
 @section('content')
@@ -125,7 +125,7 @@
 @endsection
 
 @section('scripts')
-    <script src="{{ asset('js/summary.js') }}"></script>
+    @vite('resources/js/summary.js')
     @if ($document->status == 'processing')
         <script>
             // 5秒ごとにページをリロード（処理状態を更新するため）

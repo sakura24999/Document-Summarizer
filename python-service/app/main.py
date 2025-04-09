@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Any, Union
 import os
 import uuid
 import logging
+import httpx
 from datetime import datetime
 
 # プロセッサーモジュール
@@ -14,13 +15,18 @@ from app.processors.docx_processor import DOCXProcessor
 from app.processors.text_processor import TEXTProcessor
 
 # 要約モジュール
-from app.summarizers.claude_summarizer import ClaudeSummarizer
+#from app.summarizers.claude_summarizer import ClaudeSummarizer
+
+from app.summarizers.openai_summarizer import OpenAISummarizer
 
 # ロギングの設定
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename='/app/logs/python_api.log',  # コンテナ内のログ保存先
+    filemode='a'
 )
+
 logger = logging.getLogger(__name__)
 
 # アプリケーションの初期化
@@ -80,9 +86,9 @@ def get_processor(file_type: str) -> BaseDocumentProcessor:
     if file_type == 'pdf':
         return PDFProcessor()
     elif file_type in ['docx', 'doc']:
-        return DocxProcessor()
+        return DOCXProcessor()
     elif file_type in ['txt', 'text']:
-        return TextProcessor()
+        return TEXTProcessor()
     else:
         raise ValueError(f"Unsupported file type: {file_type}")
 
@@ -105,7 +111,8 @@ async def process_document_task(task_id: str, request: DocumentRequest):
         extracted_text, metadata = processor.process(file_path)
 
         # 要約クラスの初期化
-        summarizer = ClaudeSummarizer()
+        #summarizer = ClaudeSummarizer()
+        summarizer = OpenAISummarizer()
 
         # 要約と結果の取得
         summary_text, keywords = summarizer.summarize(
@@ -125,6 +132,14 @@ async def process_document_task(task_id: str, request: DocumentRequest):
             "completed_at": datetime.now().isoformat(),
         })
 
+        # Laravel側のドキュメントステータスも更新
+        await update_document_status(
+            request.document_id,
+            "completed",
+            summary=summary_text,
+            keywords=keywords
+        )
+
         logger.info(f"Document {request.document_id} processing completed: {task_id}")
 
     except Exception as e:
@@ -135,6 +150,12 @@ async def process_document_task(task_id: str, request: DocumentRequest):
             "completed_at": datetime.now().isoformat(),
         })
 
+        # エラー時にもLaravel側に通知
+        await update_document_status(
+            request.document_id,
+            "error",
+            message=f"処理中にエラーが発生しました: {str(e)}"
+        )
 # エンドポイント定義
 @app.get("/health")
 async def health_check():
@@ -182,3 +203,33 @@ async def get_task_status(task_id: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+
+# Laravel APIと通信するためのヘルパー関数
+async def update_document_status(document_id, status, message=None, summary=None, keywords=None):
+    """ドキュメントのステータスをLaravel側で更新する"""
+    try:
+        async with httpx.AsyncClient() as client:
+            data = {
+                "status": status,
+            }
+
+            if message:
+                data["message"] = message
+
+            if summary:
+                data["summary"] = summary
+
+            if keywords:
+                data["keywords"] = keywords
+
+            # Laravelサーバーのエンドポイント
+            url = f"http://web/api/documents/{document_id}/update-status"
+            response = await client.post(url, json=data, timeout=10.0)
+
+            if response.status_code != 200:
+                logger.error(f"Failed to update document status: {response.text}")
+
+            return response.status_code == 200
+    except Exception as e:
+        logger.error(f"Error updating document status: {str(e)}")
+        return False

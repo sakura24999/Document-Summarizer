@@ -3,7 +3,8 @@
 @section('title', '文書アップロード')
 
 @section('styles')
-    <link href="{{ asset('css/upload.css') }}" rel="stylesheet">
+    @vite('resources/css/css/_upload.scss')
+    @vite('resources/js/upload.js')
 @endsection
 
 @section('content')
@@ -95,5 +96,5 @@
 @endsection
 
 @section('scripts')
-    <script src="{{ asset('js/upload.js') }}"></script>
+    @vite('resources/js/upload.js')
 @endsection
