@@ -1,0 +1,43 @@
+// resources/css/welcome.scss
+// SVGアイコンとwelcomeページ専用のスタイル
+
+.logo {
+  width: 64px !important; // !importantを使って優先適用
+  height: 64px !important;
+  color: #4f46e5;
+  animation: rotate 20s linear infinite;
+}
+
+.welcome-title {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+}
+
+.welcome-subtitle {
+  font-size: 1.25rem;
+  margin-bottom: 2rem;
+}
+
+.welcome-logo-container {
+  margin-bottom: 1.5rem;
+  display: flex;
+  justify-content: center;
+}
+
+.welcome-container {
+  text-align: center;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+.welcome-feature {
+  margin-top: 3rem;
+  margin-bottom: 1rem;
+}
+
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

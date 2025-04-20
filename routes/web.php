@@ -28,8 +28,6 @@ Route::middleware(['auth'])->group(function () {
     });
 });
 
-Route::get('/', function () {
-    return view('welcome');
-});
+Route::redirect('/', '/register');
 
 Route::redirect('/home', '/dashboard');

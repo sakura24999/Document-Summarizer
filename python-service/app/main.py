@@ -15,9 +15,9 @@ from app.processors.docx_processor import DOCXProcessor
 from app.processors.text_processor import TEXTProcessor
 
 # 要約モジュール
-#from app.summarizers.claude_summarizer import ClaudeSummarizer
+from app.summarizers.claude_summarizer import ClaudeSummarizer
 
-from app.summarizers.openai_summarizer import OpenAISummarizer
+#from app.summarizers.openai_summarizer import OpenAISummarizer
 
 # ロギングの設定
 logging.basicConfig(
@@ -97,29 +97,73 @@ async def process_document_task(task_id: str, request: DocumentRequest):
     try:
         tasks[task_id]["status"] = "processing"
 
+        # デバッグ用に情報を出力
+        print(f"Received request: {request.dict()}")
+
         # ファイルプロセッサーの取得
         processor = get_processor(request.file_type)
 
         # ファイルパスの確認
         file_path = request.file_path
+        print(f"Original file_path: {file_path}")
+
+        # もしファイルパスがdocumentsで始まっている場合は、/var/www/html/storage/app/を先頭に追加
+        if file_path.startswith('documents/'):
+            file_path = f"/var/www/html/storage/app/app/private/{file_path}"
+            print(f"Modified file_path: {file_path}")
+
+        # ファイルが存在するか確認
+        import os
         if not os.path.exists(file_path):
-            # Laravelのストレージパスの場合は変換
-            storage_path = os.getenv("LARAVEL_STORAGE_PATH", "/var/www/html/storage/app")
-            file_path = os.path.join(storage_path, request.file_path)
+            print(f"File not found at: {file_path}")
+            # 別のパスも試してみる
+            alternate_paths = [
+                f"/var/www/html/storage/app/app/private/documents/{os.path.basename(file_path)}",
+                f"/app/storage/app/app/private/{file_path}",
+                f"/var/www/html/storage/app/{file_path}",
+                f"/app/{file_path}"
+            ]
+
+            for alt_path in alternate_paths:
+                print(f"Trying alternate path: {alt_path}")
+                if os.path.exists(alt_path):
+                    file_path = alt_path
+                    print(f"File found at: {file_path}")
+                    break
+            else:
+                raise FileNotFoundError(f"File not found in any of the expected locations: {file_path}")
+
+        print(f"Processing file: {file_path}")
 
         # 文書の処理
-        extracted_text, metadata = processor.process(file_path)
+        result = processor.process(file_path)
+        extracted_text = result["text"]
+        metadata = result["metadata"]
+        print(f"Extracted text length: {len(extracted_text)} characters")
 
         # 要約クラスの初期化
-        #summarizer = ClaudeSummarizer()
-        summarizer = OpenAISummarizer()
-
+        # summarizer = OpenAISummarizer()
+        summarizer = ClaudeSummarizer()
+        logger.info("サマライザー初期化成功")
         # 要約と結果の取得
-        summary_text, keywords = summarizer.summarize(
+        summary_result = summarizer.summarize(
             text=extracted_text,
             document_type=request.document_type,
-            summary_type=request.summary_type,
+            detail_level=request.summary_type,  # summary_type から detail_level に変更
+            extract_keywords=True
         )
+
+        # 結果から要約テキストとキーワードを取得
+        summary_text = summary_result.get("summary", "")
+        keywords = summary_result.get("keywords", [])
+        logger.info("要約生成完了")
+
+        logger.info("要約結果の詳細:")
+        logger.info(f"要約テキスト長: {len(summary_text)} 文字")
+        logger.info(f"キーワード: {keywords}")
+
+        print(f"Summary generated: {len(summary_text)} characters")
+        print(f"Keywords: {keywords}")
 
         # タスク結果の更新
         tasks[task_id].update({
@@ -132,18 +176,75 @@ async def process_document_task(task_id: str, request: DocumentRequest):
             "completed_at": datetime.now().isoformat(),
         })
 
-        # Laravel側のドキュメントステータスも更新
-        await update_document_status(
-            request.document_id,
-            "completed",
-            summary=summary_text,
-            keywords=keywords
-        )
+        # URLリスト
+        logger.info("ステータス更新APIリクエスト準備開始")
+        urls_to_try = [
+            f"http://web/api/documents/{request.document_id}/update-status",
+            f"http://document-summarizer-web/api/documents/{request.document_id}/update-status",
+            f"http://nginx/api/documents/{request.document_id}/update-status",
+            f"http://web:80/api/documents/{request.document_id}/update-status"
+        ]
+
+        data = {
+            "status": "completed",
+            "summary": summary_text,
+            "keywords": keywords
+        }
+
+        logger.info(f"更新データ: status=completed, summary_length={len(summary_text)}, keywords_count={len(keywords)}")
+
+        success = False
+        last_error = None
+        logger.info("API通信開始")
+
+        for url in urls_to_try:
+            try:
+                logger.info(f"URL試行: {url}")
+
+                async with httpx.AsyncClient() as client:
+                    logger.info("HTTPリクエスト送信中...")
+                    response = await client.post(
+                        url,
+                        json=data,
+                        timeout=20.0,
+                        headers={"Accept": "application/json", "Content-Type": "application/json"}
+                    )
+                    logger.info(f"レスポンス受信: ステータスコード={response.status_code}")
+                    logger.info(f"レスポンス本文: {response.text}")
+
+                    if response.status_code == 200:
+                        logger.info("ステータス更新成功!")
+                        success = True
+                        break
+                    else:
+                        logger.error(f"ステータス更新失敗: HTTP {response.status_code}")
+            except Exception as e:
+                last_error = e
+                logger.error(f"通信エラー: {type(e).__name__}: {str(e)}")
+                # エラーの詳細情報を出力
+                import traceback
+                logger.error(f"エラー詳細: {traceback.format_exc()}")
+                continue
+
+        if success:
+            logger.info(f"Document {request.document_id} ステータス更新完了")
+        else:
+            logger.error(f"Document {request.document_id} ステータス更新: すべての接続試行が失敗")
+            if last_error:
+                logger.error(f"最後のエラー: {type(last_error).__name__}: {str(last_error)}")
+            raise Exception(f"All API connection attempts failed: {str(last_error)}")
 
         logger.info(f"Document {request.document_id} processing completed: {task_id}")
+        return {"status": "success", "task_id": task_id}
 
     except Exception as e:
+        logger.error(f"要約中のエラー（詳細）: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(f"スタックトレース: {traceback.format_exc()}")
+
+        print(f"Error in process_document_task: {str(e)}")
         logger.error(f"Error processing document {request.document_id}: {str(e)}")
+
         tasks[task_id].update({
             "status": "failed",
             "error": str(e),
@@ -151,11 +252,33 @@ async def process_document_task(task_id: str, request: DocumentRequest):
         })
 
         # エラー時にもLaravel側に通知
-        await update_document_status(
-            request.document_id,
-            "error",
-            message=f"処理中にエラーが発生しました: {str(e)}"
-        )
+        try:
+            # URLリスト
+            urls_to_try = [
+                f"http://web/api/documents/{request.document_id}/update-status",
+                f"http://document-summarizer-web/api/documents/{request.document_id}/update-status",
+                f"http://nginx/api/documents/{request.document_id}/update-status"
+            ]
+
+            error_data = {
+                "status": "error",
+                "message": f"処理中にエラーが発生しました: {str(e)}"
+            }
+
+            for url in urls_to_try:
+                try:
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(url, json=error_data, timeout=10.0)
+                        if response.status_code == 200:
+                            break
+                except Exception:
+                    continue
+        except Exception as notify_error:
+            print(f"Failed to notify error: {str(notify_error)}")
+
+        raise Exception(f"文書の要約中にエラーが発生しました: {str(e)}")
+
+        return {"status": "error", "error": str(e), "task_id": task_id}
 # エンドポイント定義
 @app.get("/health")
 async def health_check():
@@ -163,6 +286,7 @@ async def health_check():
 
 @app.post("/api/process-document", response_model=TaskResponse, dependencies=[Depends(verify_token)])
 async def process_document(request: DocumentRequest, background_tasks: BackgroundTasks):
+    print(f"Received request: {request.dict()}")
     task_id = str(uuid.uuid4())
 
     # タスク情報の初期化
@@ -208,6 +332,8 @@ if __name__ == "__main__":
 async def update_document_status(document_id, status, message=None, summary=None, keywords=None):
     """ドキュメントのステータスをLaravel側で更新する"""
     try:
+        logger.info(f"ドキュメント{document_id}のステータス更新開始: {status}")
+
         async with httpx.AsyncClient() as client:
             data = {
                 "status": status,
@@ -218,18 +344,49 @@ async def update_document_status(document_id, status, message=None, summary=None
 
             if summary:
                 data["summary"] = summary
+                logger.info(f"要約文字数: {len(summary)}")
 
             if keywords:
                 data["keywords"] = keywords
+                logger.info(f"キーワード数: {len(keywords)}")
 
-            # Laravelサーバーのエンドポイント
-            url = f"http://web/api/documents/{document_id}/update-status"
-            response = await client.post(url, json=data, timeout=10.0)
+            logger.info(f"更新データ準備完了: {data.keys()}")
+            # Docker Composeのサービス名で複数の可能性を試す
+            urls_to_try = [
+                f"http://web/api/documents/{document_id}/update-status",
+                f"http://document-summarizer-web/api/documents/{document_id}/update-status",
+                f"http://nginx/api/documents/{document_id}/update-status",
+                f"http://localhost:8080/api/documents/{document_id}/update-status"
+            ]
 
-            if response.status_code != 200:
-                logger.error(f"Failed to update document status: {response.text}")
+            success = False
+            for url in urls_to_try:
+                try:
+                    logger.info(f"URL試行: {url}")
+                    response = await client.post(url, json=data, timeout=30.0)
+                    logger.info(f"レスポンス: ステータスコード={response.status_code}")
+                    logger.info(f"レスポンス本文: {response.text[:200]}...")
 
-            return response.status_code == 200
+                    if response.status_code == 200:
+                        logger.info(f"ドキュメント{document_id}のステータス更新成功")
+                        success = True
+                        break
+                    else:
+                        logger.error(f"ステータス更新API失敗: HTTP {response.status_code}")
+                except Exception as e:
+                    logger.error(f"URL {url} との通信エラー: {type(e).__name__}: {str(e)}")
+                    # スタックトレースも出力
+                    import traceback
+                    logger.error(f"スタックトレース: {traceback.format_exc()}")
+                    continue
+            if success:
+                logger.info(f"ドキュメント{document_id}の最終ステータス更新完了")
+            else:
+                logger.error(f"ドキュメント{document_id}の更新失敗: すべてのURLで接続エラー")
+
+            return success
     except Exception as e:
-        logger.error(f"Error updating document status: {str(e)}")
+        logger.error(f"ステータス更新処理全体でのエラー: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(f"スタックトレース: {traceback.format_exc()}")
         return False
