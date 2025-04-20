@@ -32,8 +32,14 @@ class ClaudeSummarizer:
         self.max_tokens = int(os.environ.get("MAX_TOKENS", "4000"))
         self.chunk_size = int(os.environ.get("CHUNK_SIZE", "20000"))  # 文字数での最大チャンクサイズ
 
-        # Anthropicクライアントの初期化
-        self.client = anthropic.Anthropic(api_key=self.api_key)
+        # Anthropicクライアントの初期化（proxiesパラメータなし）
+        try:
+            # 新しい初期化方法
+            self.client = anthropic.Anthropic(api_key=self.api_key)
+        except TypeError:
+            # 互換性のある初期化方法
+            import http_proxy_manager
+            self.client = anthropic.Client(api_key=self.api_key)
 
     def _split_text_into_chunks(self, text: str) -> List[str]:
         """

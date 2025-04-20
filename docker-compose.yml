@@ -76,11 +76,11 @@ services:
     restart: unless-stopped
     volumes:
       - ./python-service:/app
-      - ./storage/app/documents:/app/documents
+      - ./storage:/var/www/html/storage
       - ./:/var/www/html  # アプリケーション全体を共有
     environment:
-      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      #- OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - LARAVEL_API_URL=http://web/api
       - API_TOKEN=doc_summarizer_secret_123
       - CLAUDE_MODEL=claude-3-7-sonnet-20250219  # Claude APIで使用するモデル

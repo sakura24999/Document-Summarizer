@@ -9,6 +9,8 @@
 @import 'summary';
 @import 'dashboard';
 
+@import 'welcome'; 
+
 // Global styles
 body {
   font-family: $font-family-base;
@@ -41,3 +43,4 @@ body {
     max-width: 1140px;
   }
 }
+

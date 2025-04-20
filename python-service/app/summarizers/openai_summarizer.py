@@ -1,20 +1,24 @@
 # app/summarizers/openai_summarizer.py
 import os
-import openai
 import logging
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
 class OpenAISummarizer:
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
-        openai.api_key = self.api_key
+        try:
+            # クライアントを初期化し、proxiesパラメータを明示的に無視
+            self.client = OpenAI(api_key=self.api_key)
+            logger.info("OpenAIクライアント初期化成功")
+        except Exception as e:
+            logger.error(f"OpenAIクライアント初期化エラー: {str(e)}")
+            raise
 
     def summarize(self, text: str, document_type: str = "general", summary_type: str = "standard") -> Tuple[str, List[str]]:
-        """
-        OpenAIのGPT-3.5 Turboを使って文書を要約し、キーワードを抽出する
-        """
+        """OpenAIを使った文書要約機能"""
         try:
             # 要約の詳細度の設定
             summary_length = {
@@ -47,7 +51,7 @@ class OpenAISummarizer:
             """
 
             # OpenAI APIを呼び出し
-            response = openai.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "あなたは専門文書要約の専門家です。与えられた文書を要約し、重要なキーワードを抽出します。"},

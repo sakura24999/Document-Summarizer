@@ -22,3 +22,18 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 Route::post('/documents/{document}/update-status', [DocumentController::class, 'updateStatus']);
 
 Route::post('/documents/{document}/retry', [DocumentController::class, 'retryProcessing']);
+
+Route::get('/health', function () {
+    return response()->json(['status' => 'ok', 'time' => now()->toDateTimeString()]);
+});
+
+// テスト用に要約更新を直接呼べるエンドポイントも追加
+Route::post('/test-document-update/{document}', function (App\Models\Document $document, Request $request) {
+    $document->status = $request->input('status', 'completed');
+    $document->summary = $request->input('summary', 'テスト用の要約です。');
+    $document->save();
+
+    return response()->json(['success' => true, 'document' => $document]);
+});
+
+
