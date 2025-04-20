@@ -1,0 +1,43 @@
+// Variables & Configuration
+@import 'variables';
+@import 'reset';
+
+// Layout & Components
+@import 'layout';
+@import 'buttons';
+@import 'forms';
+@import 'summary';
+@import 'dashboard';
+
+// Global styles
+body {
+  font-family: $font-family-base;
+  font-size: $font-size-base;
+  line-height: $line-height-base;
+  color: $text-color;
+  background-color: $background-color;
+}
+
+.container {
+  width: 100%;
+  padding-right: $spacing-md;
+  padding-left: $spacing-md;
+  margin-right: auto;
+  margin-left: auto;
+
+  @media (min-width: $breakpoint-sm) {
+    max-width: 540px;
+  }
+
+  @media (min-width: $breakpoint-md) {
+    max-width: 720px;
+  }
+
+  @media (min-width: $breakpoint-lg) {
+    max-width: 960px;
+  }
+
+  @media (min-width: $breakpoint-xl) {
+    max-width: 1140px;
+  }
+}
