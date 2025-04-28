@@ -1,0 +1,83 @@
+/* ボタンスタイル */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  text-decoration: none;
+  border: none;
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: translateY(0);
+  }
+
+  i {
+    margin-right: 0.5rem;
+  }
+}
+
+.btn-primary {
+  background-color: #4a6cf7;
+  color: white;
+
+  &:hover {
+    background-color: #3a5ce7;
+    box-shadow: 0 4px 10px rgba(74, 108, 247, 0.2);
+  }
+}
+
+.btn-outline {
+  border: 1px solid #d1d5db;
+  background-color: white;
+  color: #4b5563;
+
+  &:hover {
+    border-color: #9ca3af;
+    color: #111827;
+  }
+}
+
+.btn-danger {
+  background-color: #ef4444;
+  color: white;
+
+  &:hover {
+    background-color: #dc2626;
+    box-shadow: 0 4px 10px rgba(239, 68, 68, 0.2);
+  }
+}
+
+.btn-link {
+  background-color: transparent;
+  color: #4a6cf7;
+  padding: 0.5rem;
+
+  &:hover {
+    text-decoration: underline;
+    background-color: transparent;
+    transform: none;
+  }
+}
+
+.btn-sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+}
+
+/* ボタングループ */
+.button-group {
+  display: flex;
+  gap: 0.5rem;
+
+  &.button-group-right {
+    justify-content: flex-end;
+  }
+}
