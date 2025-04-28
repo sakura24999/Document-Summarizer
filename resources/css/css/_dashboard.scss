@@ -1,6 +1,8 @@
 /* ダッシュボードスタイル */
 .dashboard-container {
   padding: 1.5rem;
+  margin-left: 240px; /* サイドバーの幅に応じて調整 */
+  width: calc(100% - 240px); /* 全体幅からサイドバー幅を引く */
 }
 
 .dashboard-header {
@@ -188,6 +190,7 @@
 @media (min-width: 768px) {
   .dashboard-container {
     padding: 2rem;
+    margin-left: 240px; /* サイドバーの幅に合わせて */
   }
 
   .dashboard-sections {
@@ -196,6 +199,11 @@
 }
 
 @media (max-width: 767px) {
+  .dashboard-container {
+    margin-left: 0; /* モバイルでは左マージンなし */
+    width: 100%; /* 全幅使用 */
+  }
+
   .dashboard-header {
     flex-direction: column;
     align-items: flex-start;
