@@ -13,11 +13,17 @@ import spacy
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.tokenize import sent_tokenize
 import nltk
-from sentence_transformers import SentenceTransformer
 import re
-from huggingface_hub import HfApi, HfFolder, Repository, hf_hub_url
-from huggingface_hub import snapshot_download
-from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
+
+# huggingface_hubとsentence_transformersは互換性の問題があるため、慎重に読み込む
+try:
+    from sentence_transformers import SentenceTransformer
+    from huggingface_hub import HfApi, HfFolder, Repository, hf_hub_url
+    from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
+    HAVE_HF_HUB = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_HF_HUB = False
+    logging.warning("huggingface_hubまたはsentence_transformersのインポートに失敗しました。一部機能が制限されます。")
 
 # NLTKのダウンロードを確認
 try:
@@ -34,7 +40,7 @@ class TransformersSummarizer:
     Transformersライブラリを使用して高度な文書要約を行うクラス
     """
 
-    def __init__(self, model_name: str = "cl-tohoku/bert-base-japanese-v3",
+    def __init__(self, model_name: str = None,
                  summarization_model: str = "google/mt5-small"):
         """
         初期化
@@ -43,31 +49,56 @@ class TransformersSummarizer:
             model_name: 埋め込みモデルの名前
             summarization_model: 要約モデルの名前
         """
+        # モデル読み込みを安全に行うための互換性フラグを設定
+        self.use_sentence_transformer = HAVE_HF_HUB
+
         # 日本語spaCyモデルの読み込み
         try:
             self.nlp = spacy.load("ja_core_news_lg")
             logger.info("日本語spaCyモデルを読み込みました")
         except OSError:
-            logger.info("日本語spaCyモデルをダウンロードしています...")
-            spacy.cli.download("ja_core_news_lg")
-            self.nlp = spacy.load("ja_core_news_lg")
+            try:
+                logger.info("日本語spaCyモデルをダウンロードしています...")
+                spacy.cli.download("ja_core_news_lg")
+                self.nlp = spacy.load("ja_core_news_lg")
+            except Exception as e:
+                logger.error(f"spaCyモデルの読み込みに失敗しました: {e}")
+                # フォールバックとして小さいモデルを使用
+                try:
+                    logger.info("代替としてja_core_news_mdを試みます...")
+                    spacy.cli.download("ja_core_news_md")
+                    self.nlp = spacy.load("ja_core_news_md")
+                except Exception:
+                    logger.error("すべてのspaCyモデルの読み込みに失敗しました")
+                    raise
 
-        # 文埋め込みモデルの読み込み
-        self.sentence_model = SentenceTransformer(model_name)
-        logger.info(f"文埋め込みモデル {model_name} を読み込みました")
+        # 文埋め込みモデルの読み込み（オプショナル）
+        self.sentence_model = None
+        if self.use_sentence_transformer:
+            try:
+                model_name = model_name or "cl-tohoku/bert-base-japanese-v3"
+                self.sentence_model = SentenceTransformer(model_name)
+                logger.info(f"文埋め込みモデル {model_name} を読み込みました")
+            except Exception as e:
+                logger.error(f"文埋め込みモデルの読み込みに失敗しました: {e}")
+                self.use_sentence_transformer = False
 
         # 要約モデルの準備
-        self.tokenizer = AutoTokenizer.from_pretrained(summarization_model)
-        self.summarization_model = AutoModelForSeq2SeqLM.from_pretrained(summarization_model)
-        logger.info(f"要約モデル {summarization_model} を読み込みました")
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(summarization_model)
+            self.summarization_model = AutoModelForSeq2SeqLM.from_pretrained(summarization_model)
+            logger.info(f"要約モデル {summarization_model} を読み込みました")
 
-        # 要約パイプラインの作成
-        self.summarizer = pipeline(
-            "summarization",
-            model=self.summarization_model,
-            tokenizer=self.tokenizer,
-            device=0 if torch.cuda.is_available() else -1
-        )
+            # 要約パイプラインの作成
+            self.summarizer = pipeline(
+                "summarization",
+                model=self.summarization_model,
+                tokenizer=self.tokenizer,
+                device=0 if torch.cuda.is_available() else -1
+            )
+        except Exception as e:
+            logger.error(f"要約モデルの読み込みに失敗しました: {e}")
+            self.summarizer = None
 
         # チャンク処理のパラメータ
         self.max_chunk_length = 1024  # トークナイザに送信できる最大長
@@ -94,13 +125,18 @@ class TransformersSummarizer:
 
         logger.info(f"文書要約開始: タイプ={document_type}, 詳細レベル={detail_level}")
 
-        # チャンク分割が必要かどうかを判断
-        if len(text) > self.max_chunk_length:
-            # 長いテキストはチャンク処理
-            summary = self._summarize_long_text(text, document_type, detail_level)
+        # サマライザーが利用可能かチェック
+        if self.summarizer is None:
+            logger.warning("要約モデルが利用できないため、抽出型要約を使用します")
+            summary = self._extractive_summarization(text, detail_level)
         else:
-            # 短いテキストは直接処理
-            summary = self._summarize_text(text, document_type, detail_level)
+            # チャンク分割が必要かどうかを判断
+            if len(text) > self.max_chunk_length:
+                # 長いテキストはチャンク処理
+                summary = self._summarize_long_text(text, document_type, detail_level)
+            else:
+                # 短いテキストは直接処理
+                summary = self._summarize_text(text, document_type, detail_level)
 
         # キーワード抽出
         keywords = []
@@ -204,23 +240,36 @@ class TransformersSummarizer:
         Returns:
             チャンクのリスト
         """
-        # spaCyを使用して文を抽出
-        doc = self.nlp(text[:50000])  # メモリ制限のため長すぎるテキストは切り詰め
-        sentences = [sent.text for sent in doc.sents]
+        # 最大限安全に処理するため、まず段落で分割
+        paragraphs = text.split('\n\n')
 
-        # 文が少ない場合は段落で分割
-        if len(sentences) < 5:
-            chunks = text.split('\n\n')
-            if len(chunks) > 1:
-                return chunks
+        # 段落が少ない場合は、そのまま返す（適切なサイズに分割）
+        if len(paragraphs) <= 1:
+            # テキストを単純に文字数で分割
+            chunks = []
+            for i in range(0, len(text), self.max_chunk_length - self.chunk_overlap):
+                chunks.append(text[i:i + self.max_chunk_length])
+            return chunks
+
+        # spaCyを使用して文を抽出（メモリエラーを防ぐため、制限付き）
+        try:
+            max_text_length = min(len(text), 50000)  # メモリ制限
+            doc = self.nlp(text[:max_text_length])
+            sentences = [sent.text for sent in doc.sents]
+        except Exception as e:
+            logger.error(f"文分割エラー: {e}")
+            # フォールバックとして簡易的な文分割
+            sentences = []
+            for para in paragraphs:
+                sentences.extend([s.strip() + '。' for s in para.split('。') if s.strip()])
 
         chunks = []
         current_chunk = []
         current_length = 0
 
         for sentence in sentences:
-            # センテンスのトークン数を概算
-            sentence_length = len(self.tokenizer.tokenize(sentence))
+            # トークン数の概算（単純な文字数で代用）
+            sentence_length = len(sentence)
 
             if current_length + sentence_length > self.max_chunk_length:
                 # 現在のチャンクが最大長を超える場合
@@ -229,11 +278,8 @@ class TransformersSummarizer:
                     current_chunk = [sentence]
                     current_length = sentence_length
                 else:
-                    # 単一の文が最大長を超える場合は分割
-                    logger.warning(f"長すぎる文を検出: {len(sentence)} 文字")
-                    sentence_parts = self._split_long_sentence(sentence)
-                    for part in sentence_parts:
-                        chunks.append(part)
+                    # 単一の文が最大長を超える場合は部分的に追加
+                    chunks.append(sentence[:self.max_chunk_length])
             else:
                 current_chunk.append(sentence)
                 current_length += sentence_length
@@ -243,46 +289,6 @@ class TransformersSummarizer:
             chunks.append(' '.join(current_chunk))
 
         return chunks
-
-    def _split_long_sentence(self, sentence: str) -> List[str]:
-        """
-        長い文を適切に分割
-
-        Args:
-            sentence: 分割する文
-
-        Returns:
-            分割された文のリスト
-        """
-        # 句読点で分割
-        parts = re.split(r'[、。,.;:；：]', sentence)
-
-        # 意味のある単位に再構成
-        result = []
-        current_part = []
-        current_length = 0
-
-        for part in parts:
-            part_length = len(self.tokenizer.tokenize(part))
-
-            if current_length + part_length > self.max_chunk_length // 2:
-                if current_part:
-                    result.append(''.join(current_part))
-                    current_part = [part]
-                    current_length = part_length
-                else:
-                    # 単一の部分が長すぎる場合は文字数で分割
-                    result.append(part[:self.max_chunk_length // 2])
-                    result.append(part[self.max_chunk_length // 2:])
-            else:
-                current_part.append(part)
-                current_length += part_length
-
-        # 最後の部分を追加
-        if current_part:
-            result.append(''.join(current_part))
-
-        return result
 
     def _extractive_summarization(self, text: str, detail_level: str) -> str:
         """
@@ -296,26 +302,72 @@ class TransformersSummarizer:
             要約テキスト
         """
         # 文分割
-        sentences = [sent.text for sent in self.nlp(text).sents]
+        try:
+            doc = self.nlp(text[:50000])  # 長すぎるテキストは切り詰め
+            sentences = [sent.text for sent in doc.sents]
+        except Exception:
+            # spaCyが失敗した場合、単純な文分割を使用
+            sentences = sent_tokenize(text[:50000])
 
         if len(sentences) <= 3:
             return text
 
-        # センテンスベクトルの計算
-        sentence_embeddings = self.sentence_model.encode(sentences)
+        # センテンス埋め込みが利用可能かチェック
+        if self.use_sentence_transformer and self.sentence_model:
+            # センテンスベクトルの計算
+            try:
+                sentence_embeddings = self.sentence_model.encode(sentences)
 
-        # 文書全体の中心ベクトルを計算
-        centroid = np.mean(sentence_embeddings, axis=0)
+                # 文書全体の中心ベクトルを計算
+                centroid = np.mean(sentence_embeddings, axis=0)
 
-        # 各文の中心ベクトルとの類似度を計算
-        similarities = cosine_similarity([centroid], sentence_embeddings)[0]
+                # 各文の中心ベクトルとの類似度を計算
+                similarities = cosine_similarity([centroid], sentence_embeddings)[0]
 
+                # 詳細レベルに応じた文の数を決定
+                num_sentences = self._get_sentence_count(len(sentences), detail_level)
+
+                # 類似度が高い順に文を選択（オリジナルの順序を維持）
+                ranked_indices = similarities.argsort()[::-1][:num_sentences * 2]  # 候補を多めに取得
+                selected_indices = sorted(ranked_indices[:num_sentences])
+
+                # 選択された文を結合
+                summary = ' '.join([sentences[i] for i in selected_indices])
+                return summary
+            except Exception as e:
+                logger.error(f"埋め込みベースの要約に失敗: {e}")
+                # フォールバック処理へ
+
+        # 埋め込みベースの要約が利用できない場合は、簡易的な方法を使用
         # 詳細レベルに応じた文の数を決定
         num_sentences = self._get_sentence_count(len(sentences), detail_level)
 
-        # 類似度が高い順に文を選択（オリジナルの順序を維持）
-        ranked_indices = similarities.argsort()[::-1][:num_sentences * 2]  # 候補を多めに取得
-        selected_indices = sorted(ranked_indices[:num_sentences])
+        # 簡易的な重要度計算（文書の冒頭と末尾を重視）
+        selected_indices = []
+
+        # 冒頭の文を追加
+        head_count = max(1, num_sentences // 3)
+        selected_indices.extend(range(min(head_count, len(sentences))))
+
+        # 末尾の文を追加
+        tail_count = max(1, num_sentences // 3)
+        tail_start = max(head_count, len(sentences) - tail_count)
+        selected_indices.extend(range(tail_start, len(sentences)))
+
+        # 残りの文をランダムに選択
+        remaining_count = num_sentences - len(selected_indices)
+        if remaining_count > 0:
+            middle_range = range(head_count, tail_start)
+            if middle_range:
+                middle_indices = np.random.choice(
+                    list(middle_range),
+                    size=min(remaining_count, len(middle_range)),
+                    replace=False
+                )
+                selected_indices.extend(middle_indices)
+
+        # インデックスをソート
+        selected_indices = sorted(set(selected_indices))
 
         # 選択された文を結合
         summary = ' '.join([sentences[i] for i in selected_indices])
@@ -391,7 +443,7 @@ class TransformersSummarizer:
             キーワードのリスト
         """
         # spaCyを使用してテキストを解析
-        doc = self.nlp(text[:50000])  # メモリ制限のため長すぎるテキストは切り詰め
+        doc = self.nlp(text[:50000])  # 長すぎるテキストは切り詰め
 
         # 名詞、固有名詞、形容詞を抽出
         keywords = []
