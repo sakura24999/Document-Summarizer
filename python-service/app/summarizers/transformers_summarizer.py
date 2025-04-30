@@ -14,6 +14,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from nltk.tokenize import sent_tokenize
 import nltk
 from sentence_transformers import SentenceTransformer
+import re
 
 # NLTKのダウンロードを確認
 try:

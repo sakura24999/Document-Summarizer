@@ -1,3 +1,5 @@
+from app.summarizers.prompt_templates import get_summary_prompt
+
 def get_legal_prompt(document_subtype, *args, **kwargs):
     """法務文書のサブタイプ別プロンプト生成
 

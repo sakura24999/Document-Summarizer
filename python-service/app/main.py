@@ -7,9 +7,11 @@ import uuid
 import logging
 import httpx
 from datetime import datetime
+import sys
+import importlib
+import re
 
 # プロセッサーモジュール
-from app.processors.base import BaseDocumentProcessor
 from app.processors.pdf_processor import PDFProcessor
 from app.processors.docx_processor import DOCXProcessor
 from app.processors.text_processor import TEXTProcessor

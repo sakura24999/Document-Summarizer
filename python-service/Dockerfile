@@ -1,10 +1,18 @@
 FROM python:3.10-slim
 
+# システム依存関係のインストール
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# 依存関係のインストール
+# 依存関係のインストール - pip install のタイムアウトを延長
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --timeout=600 -r requirements.txt
 
 # アプリケーションコードのコピー
 COPY ./app /app
