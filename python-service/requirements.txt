@@ -20,4 +20,5 @@ ipadic==1.0.0
 # ベクトル計算
 numpy==1.26.2
 
-huggingface-hub==0.16.4
+# cached_download関数を含む互換性のあるバージョンを指定
+huggingface-hub==0.12.1
