@@ -15,6 +15,9 @@ from nltk.tokenize import sent_tokenize
 import nltk
 from sentence_transformers import SentenceTransformer
 import re
+from huggingface_hub import HfApi, HfFolder, Repository, hf_hub_url
+from huggingface_hub import snapshot_download
+from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
 
 # NLTKのダウンロードを確認
 try:
