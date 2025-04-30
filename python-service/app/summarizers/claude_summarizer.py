@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import anthropic
 from typing import Dict, List, Any, Optional, Tuple
 
 # プロンプトテンプレートをインポート
@@ -32,14 +31,23 @@ class ClaudeSummarizer:
         self.max_tokens = int(os.environ.get("MAX_TOKENS", "4000"))
         self.chunk_size = int(os.environ.get("CHUNK_SIZE", "20000"))  # 文字数での最大チャンクサイズ
 
-        # Anthropicクライアントの初期化（proxiesパラメータなし）
+        # Anthropicクライアントの初期化（安全に行う）
         try:
-            # 新しい初期化方法
-            self.client = anthropic.Anthropic(api_key=self.api_key)
-        except TypeError:
-            # 互換性のある初期化方法
-            import http_proxy_manager
-            self.client = anthropic.Client(api_key=self.api_key)
+            # 新しいバージョンのAnthropicライブラリ用の初期化方法
+            import anthropic
+            anthropic_version = getattr(anthropic, "__version__", "0.0.0")
+            logger.info(f"Anthropic APIバージョン: {anthropic_version}")
+
+            if anthropic_version >= "0.5.0":
+                self.client = anthropic.Anthropic(api_key=self.api_key)
+                logger.info("新しいAnthropicクライアント初期化が成功しました")
+            else:
+                # 古いバージョンのAnthropicライブラリ用の初期化方法
+                self.client = anthropic.Client(api_key=self.api_key)
+                logger.info("レガシーAnthropicクライアント初期化が成功しました")
+        except (ImportError, AttributeError) as e:
+            logger.error(f"Anthropicライブラリの初期化に失敗しました: {e}")
+            raise ValueError(f"Anthropicライブラリの初期化エラー: {str(e)}")
 
     def _split_text_into_chunks(self, text: str) -> List[str]:
         """
@@ -152,20 +160,37 @@ class ClaudeSummarizer:
             APIレスポンスから抽出した結果
         """
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=prompt_dict["system"],
-                messages=[
-                    {"role": "user", "content": f"{prompt_dict['user']}\n\n{text}"}
-                ]
-            )
+            # APIバージョンによって異なる呼び出し方法をサポート
+            import anthropic
+            anthropic_version = getattr(anthropic, "__version__", "0.0.0")
 
-            response_text = response.content[0].text
+            if anthropic_version >= "0.5.0":
+                # 新しいバージョンのAPI呼び出し
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=prompt_dict["system"],
+                    messages=[
+                        {"role": "user", "content": f"{prompt_dict['user']}\n\n{text}"}
+                    ]
+                )
+                response_text = response.content[0].text
+            else:
+                # 古いバージョンのAPI呼び出し
+                response = self.client.completion(
+                    prompt=f"{anthropic.HUMAN_PROMPT} {prompt_dict['user']}\n\n{text}\n\n{anthropic.AI_PROMPT}",
+                    model=self.model,
+                    max_tokens_to_sample=self.max_tokens,
+                    stop_sequences=[anthropic.HUMAN_PROMPT],
+                )
+                response_text = response.completion
+
             return self._extract_json_from_response(response_text)
 
         except Exception as e:
             logger.error(f"Claude API呼び出し中にエラーが発生しました: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise
 
     def summarize(self, text: str, document_type: str = 'general',
