@@ -7,3 +7,15 @@ pypdf2==3.0.1
 python-docx==0.8.11
 langchain==0.0.268
 openai==1.14.0
+# NLPライブラリ
+spacy==3.7.2
+nltk==3.8.1
+transformers==4.36.2
+torch==2.1.2
+scikit-learn==1.3.2
+sentence-transformers==2.2.2
+# 日本語処理用
+fugashi==1.3.0
+ipadic==1.0.0
+# ベクトル計算
+numpy==1.26.2
