@@ -2,12 +2,30 @@ import re
 import numpy as np
 from typing import Dict, Any, Tuple, List, Optional
 import spacy
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.ensemble import RandomForestClassifier
 import pickle
 import os
-from transformers import AutoTokenizer, AutoModel
-import torch
+import logging
+
+# 依存関係を安全にインポート
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.ensemble import RandomForestClassifier
+    HAVE_SKLEARN = True
+except ImportError:
+    HAVE_SKLEARN = False
+    logging.warning("sklearn依存関係のインポートに失敗しました。機械学習ベースの分類は利用できません。")
+
+try:
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+    HAVE_TRANSFORMERS = True
+except ImportError:
+    HAVE_TRANSFORMERS = False
+    logging.warning("transformers依存関係のインポートに失敗しました。BERT埋め込みは利用できません。")
+
+# ロギング設定
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class DocumentClassifier:
     """
@@ -36,32 +54,53 @@ class DocumentClassifier:
         }
 
         # spaCyモデルの読み込み
+        self.nlp = None
         try:
             # 日本語モデルをロード
             self.nlp = spacy.load("ja_core_news_lg")
-            print("日本語spaCyモデルを読み込みました")
+            logger.info("日本語spaCyモデルを読み込みました")
         except OSError:
-            # モデルがインストールされていない場合は、ダウンロードしてからロード
-            print("日本語spaCyモデルをダウンロードしています...")
-            spacy.cli.download("ja_core_news_lg")
-            self.nlp = spacy.load("ja_core_news_lg")
+            try:
+                # モデルがインストールされていない場合は、ダウンロードしてからロード
+                logger.info("日本語spaCyモデルをダウンロードしています...")
+                spacy.cli.download("ja_core_news_lg")
+                self.nlp = spacy.load("ja_core_news_lg")
+            except Exception as e:
+                logger.error(f"spaCyモデルのダウンロードに失敗しました: {e}")
+                try:
+                    # 小さいモデルを試す
+                    logger.info("代替としてja_core_news_mdを試みます")
+                    spacy.cli.download("ja_core_news_md")
+                    self.nlp = spacy.load("ja_core_news_md")
+                except Exception:
+                    logger.error("すべてのspaCyモデルの読み込みに失敗しました")
+                    self.nlp = None
 
-        # BERT系の文埋め込みモデルの読み込み
-        self.tokenizer = AutoTokenizer.from_pretrained("cl-tohoku/bert-base-japanese-v3")
-        self.bert_model = AutoModel.from_pretrained("cl-tohoku/bert-base-japanese-v3")
+        # BERT系の文埋め込みモデル
+        self.tokenizer = None
+        self.bert_model = None
+
+        if HAVE_TRANSFORMERS:
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained("cl-tohoku/bert-base-japanese-v3")
+                self.bert_model = AutoModel.from_pretrained("cl-tohoku/bert-base-japanese-v3")
+                logger.info("BERT日本語モデルを読み込みました")
+            except Exception as e:
+                logger.error(f"BERTモデルの読み込みに失敗しました: {e}")
 
         # 機械学習モデルの読み込み（存在すれば）
         self.ml_classifier = None
         self.vectorizer = None
 
-        if model_path and os.path.exists(model_path):
+        if HAVE_SKLEARN and model_path and os.path.exists(model_path):
             try:
-                model_data = pickle.load(open(model_path, 'rb'))
+                with open(model_path, 'rb') as f:
+                    model_data = pickle.load(f)
                 self.ml_classifier = model_data['classifier']
                 self.vectorizer = model_data['vectorizer']
-                print(f"機械学習モデルを {model_path} から読み込みました")
+                logger.info(f"機械学習モデルを {model_path} から読み込みました")
             except Exception as e:
-                print(f"モデル読み込みエラー: {e}")
+                logger.error(f"モデル読み込みエラー: {e}")
 
     def classify(self, text: str) -> Dict[str, Any]:
         """
@@ -73,22 +112,55 @@ class DocumentClassifier:
         Returns:
             専門分野と文書タイプを含む辞書
         """
+        # テキストの前処理
+        if not text:
+            return {
+                'domain': 'general',
+                'subtype': None,
+                'confidence': 0.0,
+                'entities': {},
+                'keywords': []
+            }
+
+        # メモリ制限のため、長すぎるテキストは切り詰め
+        max_text_length = min(len(text), 50000)
+        sample_text = text[:max_text_length]
+
         # spaCyによるテキスト解析
-        sample_text = text[:25000]  # 分析のために先頭部分だけを使用
-        doc = self.nlp(sample_text)
+        doc = None
+        if self.nlp:
+            try:
+                doc = self.nlp(sample_text)
+            except Exception as e:
+                logger.error(f"spaCy解析エラー: {e}")
 
         # 機械学習モデルが利用可能な場合はそれを使用
-        if self.ml_classifier and self.vectorizer:
-            domain, subtype, confidence = self._predict_with_ml(text)
+        if HAVE_SKLEARN and self.ml_classifier and self.vectorizer:
+            try:
+                domain, subtype, confidence = self._predict_with_ml(text)
+            except Exception as e:
+                logger.error(f"機械学習ベースの分類エラー: {e}")
+                # ルールベースの分類を実行
+                domain, subtype, confidence = self._predict_with_rules(text, doc)
         else:
             # ルールベースの分類を実行
             domain, subtype, confidence = self._predict_with_rules(text, doc)
 
         # 固有表現の抽出
-        entities = self._extract_entities(doc)
+        entities = {}
+        if doc:
+            try:
+                entities = self._extract_entities(doc)
+            except Exception as e:
+                logger.error(f"固有表現抽出エラー: {e}")
 
         # キーワードの抽出
-        keywords = self._extract_keywords(doc)
+        keywords = []
+        if doc:
+            try:
+                keywords = self._extract_keywords(doc)
+            except Exception as e:
+                logger.error(f"キーワード抽出エラー: {e}")
 
         return {
             'domain': domain,
@@ -108,17 +180,28 @@ class DocumentClassifier:
         Returns:
             テキストの埋め込みベクトル
         """
-        # テキストをトークン化
-        inputs = self.tokenizer(text[:512], return_tensors="pt",
-                               padding=True, truncation=True, max_length=512)
+        if not HAVE_TRANSFORMERS or not self.tokenizer or not self.bert_model:
+            # デフォルトとしてランダムベクトルを返す
+            logger.warning("BERT埋め込みが利用できないため、ランダムベクトルを生成します")
+            return np.random.randn(768)  # BERTの典型的な埋め込みサイズ
 
-        # 埋め込みを計算
-        with torch.no_grad():
-            outputs = self.bert_model(**inputs)
+        try:
+            # テキストをトークン化（長すぎるテキストは切り詰め）
+            max_text_length = min(len(text), 512)
+            inputs = self.tokenizer(text[:max_text_length], return_tensors="pt",
+                                padding=True, truncation=True, max_length=512)
 
-        # [CLS]トークンの最終隠れ状態を取得
-        embeddings = outputs.last_hidden_state[:, 0, :].numpy()
-        return embeddings[0]
+            # 埋め込みを計算
+            with torch.no_grad():
+                outputs = self.bert_model(**inputs)
+
+            # [CLS]トークンの最終隠れ状態を取得
+            embeddings = outputs.last_hidden_state[:, 0, :].numpy()
+            return embeddings[0]
+        except Exception as e:
+            logger.error(f"テキスト埋め込み計算エラー: {e}")
+            # エラーが発生した場合もデフォルトとしてランダムベクトルを返す
+            return np.random.randn(768)
 
     def _predict_with_ml(self, text: str) -> Tuple[str, str, float]:
         """
@@ -167,27 +250,29 @@ class DocumentClassifier:
         domain_scores = {
             'legal': max(legal_scores.values()) if legal_scores else 0,
             'medical': max(medical_scores.values()) if medical_scores else 0,
-            # その他の専門分野...
+            # 他の専門分野がある場合はここに追加
+            'general': 0.1  # デフォルト値
         }
 
         # 最も高いスコアの専門分野を選択
         domain = max(domain_scores, key=domain_scores.get)
         confidence = domain_scores[domain]
 
-        # NLPベースの特徴も考慮
-        # 例: 法律関連の単語の出現頻度
-        legal_tokens = [token.text for token in doc if token.text.lower() in
-                        ['法律', '契約', '条項', '規定', '義務', '権利', '法的']]
+        # NLPベースの特徴も考慮（docが利用可能な場合）
+        if doc:
+            # 例: 法律関連の単語の出現頻度
+            legal_tokens = [token.text for token in doc if token.text.lower() in
+                          ['法律', '契約', '条項', '規定', '義務', '権利', '法的']]
 
-        # 例: 医療関連の単語の出現頻度
-        medical_tokens = [token.text for token in doc if token.text.lower() in
-                         ['診断', '症状', '治療', '患者', '医療', '病院', '処方']]
+            # 例: 医療関連の単語の出現頻度
+            medical_tokens = [token.text for token in doc if token.text.lower() in
+                            ['診断', '症状', '治療', '患者', '医療', '病院', '処方']]
 
-        # トークン出現頻度に基づく信頼度スコアの調整
-        if domain == 'legal' and len(legal_tokens) > 0:
-            confidence = max(confidence, len(legal_tokens) / len(doc) * 100)
-        elif domain == 'medical' and len(medical_tokens) > 0:
-            confidence = max(confidence, len(medical_tokens) / len(doc) * 100)
+            # トークン出現頻度に基づく信頼度スコアの調整
+            if domain == 'legal' and len(legal_tokens) > 0:
+                confidence = max(confidence, min(0.95, len(legal_tokens) / len(doc) * 100))
+            elif domain == 'medical' and len(medical_tokens) > 0:
+                confidence = max(confidence, min(0.95, len(medical_tokens) / len(doc) * 100))
 
         # その専門分野内で最も高いスコアのサブタイプを選択
         if domain == 'legal':
@@ -238,7 +323,7 @@ class DocumentClassifier:
             if token.pos_ in ['NOUN', 'PROPN', 'ADJ'] and not token.is_stop and len(token.text) > 1:
                 keywords.append(token.text)
 
-        # 頻度でソート（より高度な方法はTF-IDFなど）
+        # 頻度でソート
         keyword_freq = {}
         for word in keywords:
             if word in keyword_freq:
@@ -265,8 +350,11 @@ class DocumentClassifier:
         for doc_type, pattern_list in patterns.items():
             score = 0
             for pattern in pattern_list:
-                matches = re.findall(pattern, text)
-                score += len(matches)
+                try:
+                    matches = re.findall(pattern, text)
+                    score += len(matches)
+                except re.error as e:
+                    logger.error(f"正規表現エラー ({pattern}): {e}")
 
             if score > 0:
                 # テキスト長で正規化
@@ -309,6 +397,10 @@ class DocumentClassifier:
             labels: (ドメイン, サブタイプ)のタプルからなるラベルリスト
             model_path: 学習済みモデルの保存先パス
         """
+        if not HAVE_SKLEARN:
+            logger.error("scikit-learnが利用できないため、モデルトレーニングを実行できません")
+            return
+
         # 特徴量抽出器の作成
         self.vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
         X = self.vectorizer.fit_transform(texts)
@@ -326,7 +418,9 @@ class DocumentClassifier:
             'vectorizer': self.vectorizer
         }
 
-        with open(model_path, 'wb') as f:
-            pickle.dump(model_data, f)
-
-        print(f"モデルを {model_path} に保存しました")
+        try:
+            with open(model_path, 'wb') as f:
+                pickle.dump(model_data, f)
+            logger.info(f"モデルを {model_path} に保存しました")
+        except Exception as e:
+            logger.error(f"モデル保存エラー: {e}")

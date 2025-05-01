@@ -7,8 +7,22 @@ from app.analyzers.document_classifier import DocumentClassifier
 from app.summarizers.specialized_prompt_templates import get_legal_prompt, get_medical_prompt
 from app.summarizers.output_formatters import OutputFormatter
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
+import re
+
+# 依存関係を安全にインポート
+try:
+    from sklearn.metrics.pairwise import cosine_similarity
+    HAVE_SKLEARN = True
+except ImportError:
+    HAVE_SKLEARN = False
+    logging.warning("sklearn依存関係のインポートに失敗しました。一部機能が制限されます。")
+
+try:
+    from sentence_transformers import SentenceTransformer
+    HAVE_SENTENCE_TRANSFORMER = True
+except ImportError:
+    HAVE_SENTENCE_TRANSFORMER = False
+    logging.warning("sentence_transformersのインポートに失敗しました。文埋め込み機能が制限されます。")
 
 # ロギング設定
 logger = logging.getLogger(__name__)
@@ -29,22 +43,51 @@ class EnhancedSpecializedSummarizer:
         self.claude_summarizer = ClaudeSummarizer()
 
         # Transformersベースのサマライザー
-        self.transformers_summarizer = TransformersSummarizer() if use_transformers else None
+        self.transformers_summarizer = None
+        if use_transformers:
+            try:
+                self.transformers_summarizer = TransformersSummarizer()
+                logger.info("TransformersSummarizerを初期化しました")
+            except Exception as e:
+                logger.error(f"TransformersSummarizerの初期化に失敗しました: {e}")
+                logger.info("Transformersサマライザーなしで続行します")
 
         # 文書分類器
-        self.classifier = DocumentClassifier()
+        try:
+            self.classifier = DocumentClassifier()
+            logger.info("DocumentClassifierを初期化しました")
+        except Exception as e:
+            logger.error(f"DocumentClassifierの初期化に失敗しました: {e}")
+            self.classifier = None
 
         # spaCy NLPモデル
+        self.nlp = None
         try:
             self.nlp = spacy.load('ja_core_news_lg')
             logger.info("日本語spaCyモデルを読み込みました")
         except OSError:
-            logger.info("日本語spaCyモデルをダウンロードしています...")
-            spacy.cli.download('ja_core_news_lg')
-            self.nlp = spacy.load('ja_core_news_lg')
+            try:
+                logger.info("日本語spaCyモデルをダウンロードしています...")
+                spacy.cli.download('ja_core_news_lg')
+                self.nlp = spacy.load('ja_core_news_lg')
+            except Exception as e:
+                logger.error(f"spaCyモデルのダウンロードに失敗しました: {e}")
+                try:
+                    # 小さいモデルを試す
+                    logger.info("代替としてja_core_news_mdを試みます")
+                    spacy.cli.download('ja_core_news_md')
+                    self.nlp = spacy.load('ja_core_news_md')
+                except Exception:
+                    logger.error("すべてのspaCyモデルの読み込みに失敗しました")
 
         # 文埋め込みモデル
-        self.sentence_model = SentenceTransformer('cl-tohoku/bert-base-japanese-v3')
+        self.sentence_model = None
+        if HAVE_SENTENCE_TRANSFORMER:
+            try:
+                self.sentence_model = SentenceTransformer('cl-tohoku/bert-base-japanese-v3')
+                logger.info("SentenceTransformerモデルを初期化しました")
+            except Exception as e:
+                logger.error(f"SentenceTransformerモデルの初期化に失敗しました: {e}")
 
         # 使用するNLPライブラリの情報をログに記録
         logger.info(f"EnhancedSpecializedSummarizer初期化: Transformers={use_transformers}")
@@ -71,64 +114,94 @@ class EnhancedSpecializedSummarizer:
 
         # 文書タイプが指定されていなければ自動検出
         if not document_type or not document_subtype:
-            classification = self.classifier.classify(processed_text)
+            if self.classifier:
+                try:
+                    classification = self.classifier.classify(processed_text)
 
-            if not document_type:
-                document_type = classification['domain']
+                    if not document_type:
+                        document_type = classification['domain']
 
-            if not document_subtype:
-                document_subtype = classification['subtype']
+                    if not document_subtype:
+                        document_subtype = classification['subtype']
 
-            # 分類結果をログに記録
-            logger.info(f"文書分類結果: {document_type}, サブタイプ: {document_subtype}")
-            logger.info(f"分類信頼度: {classification.get('confidence', 'N/A')}")
+                    # 分類結果をログに記録
+                    logger.info(f"文書分類結果: {document_type}, サブタイプ: {document_subtype}")
+                    logger.info(f"分類信頼度: {classification.get('confidence', 'N/A')}")
+                except Exception as e:
+                    logger.error(f"文書分類に失敗しました: {e}")
+                    # デフォルト値を設定
+                    document_type = document_type or 'general'
+                    document_subtype = document_subtype or None
+            else:
+                # 分類器が利用できない場合はデフォルト値を使用
+                document_type = document_type or 'general'
+                document_subtype = document_subtype or None
 
         # NLPライブラリを使用した事前解析
-        analysis_result = self._analyze_with_nlp(processed_text, document_type, document_subtype)
+        analysis_result = {}
+        if self.nlp:
+            try:
+                analysis_result = self._analyze_with_nlp(processed_text, document_type, document_subtype)
+            except Exception as e:
+                logger.error(f"NLP解析に失敗しました: {e}")
 
         # 専門分野に応じたキーワード抽出
+        keywords = []
         if extract_keywords:
-            keywords = self._extract_domain_specific_keywords(processed_text, document_type)
-        else:
-            keywords = []
+            try:
+                keywords = self._extract_domain_specific_keywords(processed_text, document_type)
+            except Exception as e:
+                logger.error(f"キーワード抽出に失敗しました: {e}")
 
         # 要約の生成
+        summary = ""
         if use_claude:
-            # 専門分野に応じたプロンプトを取得
-            if document_type == 'legal' and document_subtype:
-                prompt_dict = get_legal_prompt(document_subtype, detail_level=detail_level,
-                                              extract_keywords=False)  # キーワードは既に抽出済み
-            elif document_type == 'medical' and document_subtype:
-                prompt_dict = get_medical_prompt(document_subtype, detail_level=detail_level,
-                                               extract_keywords=False)
-            else:
-                # 基本のプロンプトを使用
-                prompt_dict = None
+            try:
+                # 専門分野に応じたプロンプトを取得
+                if document_type == 'legal' and document_subtype:
+                    prompt_dict = get_legal_prompt(document_subtype, detail_level=detail_level,
+                                                extract_keywords=False)  # キーワードは既に抽出済み
+                elif document_type == 'medical' and document_subtype:
+                    prompt_dict = get_medical_prompt(document_subtype, detail_level=detail_level,
+                                                extract_keywords=False)
+                else:
+                    # 基本のプロンプトを使用
+                    prompt_dict = None
 
-            # Claude APIを使用した要約
-            if prompt_dict:
-                # 特化プロンプトを使用
-                result = self.claude_summarizer._call_claude_api(processed_text, prompt_dict)
-                summary = result.get("summary", "")
-            else:
-                # 標準の要約メソッドを使用
-                result = self.claude_summarizer.summarize(
-                    text=processed_text,
-                    document_type=document_type,
-                    detail_level=detail_level,
-                    extract_keywords=False
-                )
-                summary = result.get("summary", "")
-        else:
-            # Transformersベースの要約を使用
+                # Claude APIを使用した要約
+                if prompt_dict:
+                    # 特化プロンプトを使用
+                    result = self.claude_summarizer._call_claude_api(processed_text, prompt_dict)
+                    summary = result.get("summary", "")
+                else:
+                    # 標準の要約メソッドを使用
+                    result = self.claude_summarizer.summarize(
+                        text=processed_text,
+                        document_type=document_type,
+                        detail_level=detail_level,
+                        extract_keywords=False
+                    )
+                    summary = result.get("summary", "")
+            except Exception as e:
+                logger.error(f"Claude APIを使用した要約に失敗しました: {e}")
+                # フォールバックとしてTransformersを使用
+                use_claude = False
+
+        # Transformersベースの要約を使用
+        if not use_claude:
             if self.transformers_summarizer:
-                result = self.transformers_summarizer.summarize(
-                    text=processed_text,
-                    document_type=document_type,
-                    detail_level=detail_level,
-                    extract_keywords=False
-                )
-                summary = result.get("summary", "")
+                try:
+                    result = self.transformers_summarizer.summarize(
+                        text=processed_text,
+                        document_type=document_type,
+                        detail_level=detail_level,
+                        extract_keywords=False
+                    )
+                    summary = result.get("summary", "")
+                except Exception as e:
+                    logger.error(f"Transformersサマライザーを使用した要約に失敗しました: {e}")
+                    # フォールバックとして抽出型要約を実行
+                    summary = self._extractive_summarization(processed_text, detail_level)
             else:
                 # フォールバックとして抽出型要約を実行
                 summary = self._extractive_summarization(processed_text, detail_level)
@@ -189,8 +262,12 @@ class EnhancedSpecializedSummarizer:
         Returns:
             解析結果
         """
-        # spaCyによる解析
-        doc = self.nlp(text[:50000])  # メモリ制限のため長すぎるテキストは切り詰め
+        if not self.nlp:
+            return {}
+
+        # spaCyによる解析（メモリ制限のため長すぎるテキストは切り詰め）
+        max_text_length = min(len(text), 50000)
+        doc = self.nlp(text[:max_text_length])
 
         # 文書タイプに応じた解析
         if document_type == 'legal':
@@ -240,8 +317,6 @@ class EnhancedSpecializedSummarizer:
 
         # 契約書の場合
         if subtype == 'contract':
-            import re
-
             # 条項の抽出
             clauses = []
             clause_pattern = re.compile(r'第(\d+|[一二三四五六七八九十]+)条')
@@ -322,7 +397,6 @@ class EnhancedSpecializedSummarizer:
                 treatments.append(treatment_term)
 
         # 重要な数値の抽出
-        import re
         measurements = []
         measurement_pattern = re.compile(r'\d+(\.\d+)?\s*(mg|ml|g|kg|cc|mmHg|mm)')
 
@@ -388,7 +462,6 @@ class EnhancedSpecializedSummarizer:
                 technical_terms.append(compound_term)
 
         # 数値仕様の抽出
-        import re
         specifications = []
         spec_pattern = re.compile(r'\d+(\.\d+)?\s*(Hz|MHz|GHz|KB|MB|GB|TB|mm|cm|m|kg|V|W)')
 
@@ -442,24 +515,32 @@ class EnhancedSpecializedSummarizer:
         # 文ベクトルの計算
         sentences = [sent.text for sent in doc.sents]
 
-        if len(sentences) >= 3:
-            # 埋め込みの計算
-            embeddings = self.sentence_model.encode(sentences)
+        if len(sentences) >= 3 and self.sentence_model and HAVE_SKLEARN:
+            try:
+                # 埋め込みの計算
+                embeddings = self.sentence_model.encode(sentences)
 
-            # 文書の中心ベクトルを計算
-            centroid = np.mean(embeddings, axis=0)
+                # 文書の中心ベクトルを計算
+                centroid = np.mean(embeddings, axis=0)
 
-            # 各文の中心ベクトルとの類似度を計算
-            similarities = cosine_similarity([centroid], embeddings)[0]
+                # 各文の中心ベクトルとの類似度を計算
+                similarities = cosine_similarity([centroid], embeddings)[0]
 
-            # 類似度が高い順にインデックスを取得
-            top_indices = similarities.argsort()[-5:][::-1]  # 上位5文
+                # 類似度が高い順にインデックスを取得
+                top_indices = similarities.argsort()[-5:][::-1]  # 上位5文
 
-            # 元の順序でソート
-            top_indices = sorted(top_indices)
+                # 元の順序でソート
+                top_indices = sorted(top_indices)
 
-            # 重要な文を抽出
-            important_sentences = [sentences[i] for i in top_indices]
+                # 重要な文を抽出
+                important_sentences = [sentences[i] for i in top_indices]
+            except Exception as e:
+                logger.error(f"文ベクトル計算中にエラーが発生しました: {e}")
+                # フォールバックとして先頭の文を重要とみなす
+                important_sentences = sentences[:5]
+        else:
+            # 埋め込みが使えない場合は単純に先頭の文を使用
+            important_sentences = sentences[:5]
 
         return {
             'entities': entities,
@@ -478,8 +559,12 @@ class EnhancedSpecializedSummarizer:
         Returns:
             キーワードのリスト
         """
-        # spaCyを使用してテキストを解析
-        doc = self.nlp(text[:50000])  # メモリ制限のため長すぎるテキストは切り詰め
+        if not self.nlp:
+            return []
+
+        # spaCyを使用してテキストを解析（メモリ制限のため長すぎるテキストは切り詰め）
+        max_text_length = min(len(text), 50000)
+        doc = self.nlp(text[:max_text_length])
 
         # 基本的なキーワード候補を抽出（名詞、固有名詞など）
         keywords = []
@@ -542,6 +627,19 @@ class EnhancedSpecializedSummarizer:
         Returns:
             抽出型要約
         """
+        if not self.nlp:
+            # 単純な要約（先頭と末尾の部分を使用）
+            paragraphs = text.split('\n\n')
+            if len(paragraphs) <= 3:
+                return text
+
+            if detail_level == 'brief':
+                return paragraphs[0]
+            elif detail_level == 'detailed':
+                return '\n\n'.join(paragraphs[:3] + paragraphs[-2:])
+            else:  # standard
+                return '\n\n'.join(paragraphs[:2] + paragraphs[-1:])
+
         # テキストを文に分割
         doc = self.nlp(text[:50000])
         sentences = [sent.text for sent in doc.sents]
@@ -549,7 +647,7 @@ class EnhancedSpecializedSummarizer:
         if len(sentences) <= 3:
             return text
 
-        # 詳細レベルに応じた要約の長さを決定
+        # 詳細レベルに応じた文の数を決定
         if detail_level == 'brief':
             num_sentences = min(5, max(3, len(sentences) // 10))
         elif detail_level == 'detailed':
@@ -557,38 +655,60 @@ class EnhancedSpecializedSummarizer:
         else:  # standard
             num_sentences = min(10, max(5, len(sentences) // 5))
 
-        # センテンスベクトルの計算
-        sentence_embeddings = self.sentence_model.encode(sentences)
+        # 埋め込みベースの要約が可能か確認
+        if self.sentence_model and HAVE_SKLEARN:
+            try:
+                # センテンスベクトルの計算
+                sentence_embeddings = self.sentence_model.encode(sentences)
 
-        # TF-IDFベースの文の重要度スコアリング
-        from sklearn.feature_extraction.text import TfidfVectorizer
+                # 文書の中心ベクトルを計算
+                centroid = np.mean(sentence_embeddings, axis=0)
 
-        vectorizer = TfidfVectorizer(min_df=1)
-        tfidf_matrix = vectorizer.fit_transform(sentences)
+                # 各文の中心ベクトルとの類似度を計算
+                similarities = cosine_similarity([centroid], sentence_embeddings)[0]
 
-        # 各文の重要度スコアを計算
-        sentence_scores = []
+                # 類似度が高い順に文を選択（オリジナルの順序を維持）
+                ranked_indices = similarities.argsort()[-num_sentences * 2:][::-1]  # 候補を多めに取得
+                selected_indices = sorted(ranked_indices[:num_sentences])
 
-        for i, sentence in enumerate(sentences):
-            # TF-IDFスコア（文内の単語の重要度の合計）
-            tfidf_score = tfidf_matrix[i].sum()
+                # 選択された文を結合
+                summary = ' '.join([sentences[i] for i in selected_indices])
+                return summary
+            except Exception as e:
+                logger.error(f"埋め込みベースの要約に失敗しました: {e}")
+                # フォールバック処理へ
 
-            # 位置スコア（文書の冒頭と末尾の文は重要である可能性が高い）
-            position_score = 0
-            if i < len(sentences) * 0.2 or i > len(sentences) * 0.8:
-                position_score = 0.2
+        # 埋め込みが使えない場合のフォールバック
+        # 簡易的な重要度計算（文書の冒頭と末尾の文は重要である可能性が高い）
+        selected_indices = []
 
-            # 最終スコア
-            sentence_scores.append((i, tfidf_score + position_score))
+        # 冒頭の文を追加
+        head_count = max(1, num_sentences // 3)
+        selected_indices.extend(range(min(head_count, len(sentences))))
 
-        # スコアの高い順に文を選択
-        ranked_sentences = sorted(sentence_scores, key=lambda x: x[1], reverse=True)
-        top_sentence_indices = [x[0] for x in ranked_sentences[:num_sentences]]
+        # 末尾の文を追加
+        tail_count = max(1, num_sentences // 3)
+        tail_start = max(head_count, len(sentences) - tail_count)
+        selected_indices.extend(range(tail_start, len(sentences)))
 
-        # 元の順序でソート
-        selected_indices = sorted(top_sentence_indices)
+                        # 残りの文を均等に選択
+        remaining_count = num_sentences - len(selected_indices)
+        if remaining_count > 0 and head_count < tail_start:
+            step = (tail_start - head_count) // (remaining_count + 1)
+            if step > 0:
+                for i in range(1, remaining_count + 1):
+                    selected_indices.append(head_count + i * step)
+            else:
+                # ステップが計算できない場合は中間部分から適当に選択
+                middle_indices = list(range(head_count, tail_start))
+                if middle_indices:
+                    selected_count = min(remaining_count, len(middle_indices))
+                    selected_middle = np.random.choice(middle_indices, selected_count, replace=False)
+                    selected_indices.extend(selected_middle)
+
+        # インデックスをソート
+        selected_indices = sorted(list(set(selected_indices)))
 
         # 選択された文を結合
         summary = ' '.join([sentences[i] for i in selected_indices])
-
         return summary
