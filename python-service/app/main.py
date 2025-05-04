@@ -135,7 +135,7 @@ async def process_document_task(task_id: str, request: DocumentRequest):
         # デバッグ情報の追加
         print(f"Python環境: {sys.version}")
         print(f"spaCy利用可能: {importlib.util.find_spec('spacy') is not None}")
-        print(f"使用中のライブラリ: {[module.__name__ for module in sys.modules.values() if hasattr(module, '__file__') and 'site-packages' in module.__file__]}")
+        print(f"使用中のライブラリ: {[module.__name__ for module in sys.modules.values() if module is not None and hasattr(module, '__file__') and module.__file__ is not None and 'site-packages' in module.__file__]}")
 
         # ファイルプロセッサーの取得
         processor = get_processor(request.file_type)

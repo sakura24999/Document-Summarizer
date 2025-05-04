@@ -39,10 +39,21 @@ class ClaudeSummarizer:
             logger.info(f"Anthropic APIバージョン: {anthropic_version}")
 
             if anthropic_version >= "0.5.0":
-                self.client = anthropic.Anthropic(api_key=self.api_key)
+                # デバッグ情報を追加
+                logger.info("Anthropic 0.5.0以上を使用しています。プロキシなしでクライアントを初期化します。")
+
+                # 明示的にhttpxクライアントを作成してproxies関連の問題を回避
+                import httpx
+                http_client = httpx.Client(timeout=30.0)
+
+                # proxyが環境変数から設定されている可能性があるため、明示的にAPI_KEYのみ渡す
+                self.client = anthropic.Anthropic(
+                    api_key=self.api_key,
+                    http_client=http_client
+                )
                 logger.info("新しいAnthropicクライアント初期化が成功しました")
             else:
-                # 古いバージョンのAnthropicライブラリ用の初期化方法
+                # 古いバージョン用
                 self.client = anthropic.Client(api_key=self.api_key)
                 logger.info("レガシーAnthropicクライアント初期化が成功しました")
         except (ImportError, AttributeError) as e:
@@ -165,7 +176,17 @@ class ClaudeSummarizer:
             anthropic_version = getattr(anthropic, "__version__", "0.0.0")
 
             if anthropic_version >= "0.5.0":
-                # 新しいバージョンのAPI呼び出し
+                # Anthropic API v0.5.0用のリクエスト形式
+                # 古いバージョンのAPI（v0.5.0）では以下の形式を使用
+                response = self.client.completions.create(
+                    prompt=f"{anthropic.HUMAN_PROMPT} {prompt_dict['user']}\n\n{text}\n\n{anthropic.AI_PROMPT}",
+                    model=self.model,
+                    max_tokens_to_sample=self.max_tokens,
+                    stop_sequences=[anthropic.HUMAN_PROMPT],
+                )
+                response_text = response.completion
+            else:
+                # 新しいバージョンのAPI（v1.0以上）用
                 response = self.client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
@@ -175,15 +196,6 @@ class ClaudeSummarizer:
                     ]
                 )
                 response_text = response.content[0].text
-            else:
-                # 古いバージョンのAPI呼び出し
-                response = self.client.completion(
-                    prompt=f"{anthropic.HUMAN_PROMPT} {prompt_dict['user']}\n\n{text}\n\n{anthropic.AI_PROMPT}",
-                    model=self.model,
-                    max_tokens_to_sample=self.max_tokens,
-                    stop_sequences=[anthropic.HUMAN_PROMPT],
-                )
-                response_text = response.completion
 
             return self._extract_json_from_response(response_text)
 
