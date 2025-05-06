@@ -2,6 +2,7 @@ import os
 import json
 import logging
 from typing import Dict, List, Any, Optional, Tuple
+import httpx
 
 # プロンプトテンプレートをインポート
 from app.summarizers.prompt_templates import get_summary_prompt
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class ClaudeSummarizer:
     """
-    Claude APIを使用して文書を要約するクラス
+    Claude APIを使用して文書を要約するクラス（直接HTTPリクエスト版）
     """
 
     def __init__(self, api_key=None, model=None):
@@ -31,34 +32,60 @@ class ClaudeSummarizer:
         self.max_tokens = int(os.environ.get("MAX_TOKENS", "4000"))
         self.chunk_size = int(os.environ.get("CHUNK_SIZE", "20000"))  # 文字数での最大チャンクサイズ
 
-        # Anthropicクライアントの初期化（安全に行う）
+        # API呼び出し用の共通ヘッダー
+        self.headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+
+        logger.info(f"直接API呼び出しモードで初期化しました。モデル: {self.model}")
+
+    def _call_claude_api_direct(self, text: str, prompt_dict: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Claude APIを直接呼び出す（同期版）
+
+        Args:
+            text: 要約するテキスト
+            prompt_dict: プロンプト辞書（system, user）
+
+        Returns:
+            APIレスポンスから抽出した結果
+        """
         try:
-            # 新しいバージョンのAnthropicライブラリ用の初期化方法
-            import anthropic
-            anthropic_version = getattr(anthropic, "__version__", "0.0.0")
-            logger.info(f"Anthropic APIバージョン: {anthropic_version}")
+            # APIリクエストデータの構築
+            data = {
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "system": prompt_dict["system"],
+                "messages": [
+                    {"role": "user", "content": f"{prompt_dict['user']}\n\n{text}"}
+                ]
+            }
 
-            if anthropic_version >= "0.5.0":
-                # デバッグ情報を追加
-                logger.info("Anthropic 0.5.0以上を使用しています。プロキシなしでクライアントを初期化します。")
+            # 同期版のAPIリクエスト
+            response = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=self.headers,
+                json=data,
+                timeout=60.0
+            )
 
-                # 明示的にhttpxクライアントを作成してproxies関連の問題を回避
-                import httpx
-                http_client = httpx.Client(timeout=30.0)
+            # エラーチェック
+            if response.status_code != 200:
+                logger.error(f"API呼び出しエラー: {response.status_code} - {response.text}")
+                raise ValueError(f"API呼び出しエラー: {response.status_code} - {response.text}")
 
-                # proxyが環境変数から設定されている可能性があるため、明示的にAPI_KEYのみ渡す
-                self.client = anthropic.Anthropic(
-                    api_key=self.api_key,
-                    http_client=http_client
-                )
-                logger.info("新しいAnthropicクライアント初期化が成功しました")
-            else:
-                # 古いバージョン用
-                self.client = anthropic.Client(api_key=self.api_key)
-                logger.info("レガシーAnthropicクライアント初期化が成功しました")
-        except (ImportError, AttributeError) as e:
-            logger.error(f"Anthropicライブラリの初期化に失敗しました: {e}")
-            raise ValueError(f"Anthropicライブラリの初期化エラー: {str(e)}")
+            result = response.json()
+            response_text = result["content"][0]["text"]
+
+            return self._extract_json_from_response(response_text)
+
+        except Exception as e:
+            logger.error(f"Claude API呼び出し中にエラーが発生しました: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise ValueError(f"Claude API呼び出し中にエラーが発生しました: {e}")
 
     def _split_text_into_chunks(self, text: str) -> List[str]:
         """
@@ -159,52 +186,6 @@ class ClaudeSummarizer:
             "keywords": keywords
         }
 
-    def _call_claude_api(self, text: str, prompt_dict: Dict[str, str]) -> Dict[str, Any]:
-        """
-        Claude APIを呼び出す
-
-        Args:
-            text: 要約するテキスト
-            prompt_dict: プロンプト辞書（system, user）
-
-        Returns:
-            APIレスポンスから抽出した結果
-        """
-        try:
-            # APIバージョンによって異なる呼び出し方法をサポート
-            import anthropic
-            anthropic_version = getattr(anthropic, "__version__", "0.0.0")
-
-            if anthropic_version >= "0.5.0":
-                # Anthropic API v0.5.0用のリクエスト形式
-                # 古いバージョンのAPI（v0.5.0）では以下の形式を使用
-                response = self.client.completions.create(
-                    prompt=f"{anthropic.HUMAN_PROMPT} {prompt_dict['user']}\n\n{text}\n\n{anthropic.AI_PROMPT}",
-                    model=self.model,
-                    max_tokens_to_sample=self.max_tokens,
-                    stop_sequences=[anthropic.HUMAN_PROMPT],
-                )
-                response_text = response.completion
-            else:
-                # 新しいバージョンのAPI（v1.0以上）用
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    system=prompt_dict["system"],
-                    messages=[
-                        {"role": "user", "content": f"{prompt_dict['user']}\n\n{text}"}
-                    ]
-                )
-                response_text = response.content[0].text
-
-            return self._extract_json_from_response(response_text)
-
-        except Exception as e:
-            logger.error(f"Claude API呼び出し中にエラーが発生しました: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            raise
-
     def summarize(self, text: str, document_type: str = 'general',
                   detail_level: str = 'standard', extract_keywords: bool = True) -> Dict[str, Any]:
         """
@@ -234,7 +215,7 @@ class ClaudeSummarizer:
                 extract_keywords=extract_keywords
             )
 
-            result = self._call_claude_api(text, prompt_dict)
+            result = self._call_claude_api_direct(text, prompt_dict)
             result["detail_level"] = detail_level
 
             return result
@@ -259,7 +240,7 @@ class ClaudeSummarizer:
                 )
 
                 # チャンクを処理
-                chunk_result = self._call_claude_api(chunk, prompt_dict)
+                chunk_result = self._call_claude_api_direct(chunk, prompt_dict)
                 chunk_results.append(chunk_result)
 
             # 全チャンクの要約を結合
@@ -274,7 +255,7 @@ class ClaudeSummarizer:
                 is_final_summary=True
             )
 
-            final_result = self._call_claude_api(combined_summaries, final_prompt)
+            final_result = self._call_claude_api_direct(combined_summaries, final_prompt)
             final_result["detail_level"] = detail_level
 
             # 処理情報を追加

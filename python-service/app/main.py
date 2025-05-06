@@ -182,11 +182,11 @@ async def process_document_task(task_id: str, request: DocumentRequest):
         # summarizer = OpenAISummarizer()
         summarizer = ClaudeSummarizer()
         logger.info("サマライザー初期化成功")
-        # 要約と結果の取得
-        summary_result = summarizer.summarize(
+        # 要約と結果の取得（非同期処理）
+        summary_result = await summarizer.summarize(
             text=extracted_text,
             document_type=request.document_type,
-            detail_level=request.summary_type,  # summary_type から detail_level に変更
+            detail_level=request.summary_type,
             extract_keywords=True
         )
 
@@ -558,62 +558,64 @@ if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
 
 # Laravel APIと通信するためのヘルパー関数
-async def update_document_status(document_id, status, message=None, summary=None, keywords=None):
+def update_document_status(document_id, status, message=None, summary=None, keywords=None):
     """ドキュメントのステータスをLaravel側で更新する"""
     try:
         logger.info(f"ドキュメント{document_id}のステータス更新開始: {status}")
 
-        async with httpx.AsyncClient() as client:
-            data = {
-                "status": status,
-            }
+        # データ準備
+        data = {"status": status}
+        if message:
+            data["message"] = message
+        if summary:
+            data["summary"] = summary
+            logger.info(f"要約文字数: {len(summary)}")
+        if keywords:
+            data["keywords"] = keywords
+            logger.info(f"キーワード数: {len(keywords)}")
 
-            if message:
-                data["message"] = message
+        logger.info(f"更新データ準備完了: {data.keys()}")
 
-            if summary:
-                data["summary"] = summary
-                logger.info(f"要約文字数: {len(summary)}")
+        # テスト用の短いデータで試す
+        test_data = {"status": status, "message": "テスト更新"}
 
-            if keywords:
-                data["keywords"] = keywords
-                logger.info(f"キーワード数: {len(keywords)}")
+        # URLリスト
+        urls_to_try = [
+            f"http://web/api/documents/{document_id}/update-status",
+            f"http://document-summarizer-web/api/documents/{document_id}/update-status",
+            f"http://nginx/api/documents/{document_id}/update-status",
+            f"http://localhost:8080/api/documents/{document_id}/update-status"
+        ]
 
-            logger.info(f"更新データ準備完了: {data.keys()}")
-            # Docker Composeのサービス名で複数の可能性を試す
-            urls_to_try = [
-                f"http://web/api/documents/{document_id}/update-status",
-                f"http://document-summarizer-web/api/documents/{document_id}/update-status",
-                f"http://nginx/api/documents/{document_id}/update-status",
-                f"http://localhost:8080/api/documents/{document_id}/update-status"
-            ]
+        for url in urls_to_try:
+            try:
+                logger.info(f"URL試行: {url} (テストデータ)")
+                # まず短いテストデータで試す
+                response = httpx.post(url, json=test_data, timeout=10.0)
 
-            success = False
-            for url in urls_to_try:
-                try:
-                    logger.info(f"URL試行: {url}")
-                    response = await client.post(url, json=data, timeout=30.0)
-                    logger.info(f"レスポンス: ステータスコード={response.status_code}")
-                    logger.info(f"レスポンス本文: {response.text[:200]}...")
+                if response.status_code == 200:
+                    # テストが成功したら実際のデータを送信
+                    logger.info(f"テスト成功、実データ送信: {url}")
+                    response = httpx.post(url, json=data, timeout=30.0)
 
                     if response.status_code == 200:
                         logger.info(f"ドキュメント{document_id}のステータス更新成功")
-                        success = True
-                        break
+                        return True
                     else:
-                        logger.error(f"ステータス更新API失敗: HTTP {response.status_code}")
-                except Exception as e:
-                    logger.error(f"URL {url} との通信エラー: {type(e).__name__}: {str(e)}")
-                    # スタックトレースも出力
-                    import traceback
-                    logger.error(f"スタックトレース: {traceback.format_exc()}")
-                    continue
-            if success:
-                logger.info(f"ドキュメント{document_id}の最終ステータス更新完了")
-            else:
-                logger.error(f"ドキュメント{document_id}の更新失敗: すべてのURLで接続エラー")
+                        logger.error(f"実データ送信失敗: HTTP {response.status_code}")
+                        logger.error(f"応答内容: {response.text[:500]}...")
+                else:
+                    logger.error(f"テスト送信失敗: HTTP {response.status_code}")
+                    logger.error(f"応答内容: {response.text[:500]}...")
+            except Exception as e:
+                logger.error(f"URL {url} との通信エラー: {type(e).__name__}: {str(e)}")
+                # スタックトレースも出力
+                import traceback
+                logger.error(f"スタックトレース: {traceback.format_exc()}")
+                continue
 
-            return success
+        logger.error(f"ドキュメント{document_id}の更新失敗: すべてのURLで接続エラー")
+        return False
     except Exception as e:
         logger.error(f"ステータス更新処理全体でのエラー: {type(e).__name__}: {str(e)}")
         import traceback

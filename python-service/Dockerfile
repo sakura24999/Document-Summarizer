@@ -10,9 +10,10 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# 依存関係のインストール - pip install のタイムアウトを延長
+# 依存関係のインストール
 COPY requirements.txt .
 RUN pip install --no-cache-dir --timeout=600 -r requirements.txt
+RUN pip install --no-cache-dir httpx==0.24.1
 
 # アプリケーションコードのコピー
 COPY ./app /app
